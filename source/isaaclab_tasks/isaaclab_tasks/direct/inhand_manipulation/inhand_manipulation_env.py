@@ -396,6 +396,11 @@ class InHandManipulationEnv(DirectRLEnv):
             self._set_joint_pos_target = self.hand.set_joint_position_target
         else:
             self._set_joint_pos_target = self.hand.set_joint_position_target_index
+        self._set_joint_pos_target_mask = self.hand.set_joint_position_target_mask
+        self._write_obj_root_pose_mask = self.object.write_root_pose_to_sim_mask
+        self._write_obj_root_vel_mask = self.object.write_root_velocity_to_sim_mask
+        self._write_hand_joint_pos_mask = self.hand.write_joint_position_to_sim_mask
+        self._write_hand_joint_vel_mask = self.hand.write_joint_velocity_to_sim_mask
 
         if not self._inhand_warp_state_buffers_available():
             raise RuntimeError(
@@ -778,11 +783,11 @@ class InHandManipulationEnv(DirectRLEnv):
         """
         env_mask_wp = ctx.reset_mask_wp
 
-        self.object.write_root_pose_to_sim_mask(root_pose=self._reset_object_pose_wp, env_mask=env_mask_wp)
-        self.object.write_root_velocity_to_sim_mask(root_velocity=self._reset_object_velocity_wp, env_mask=env_mask_wp)
-        self.hand.set_joint_position_target_mask(target=self._cur_targets_wp, env_mask=env_mask_wp)
-        self.hand.write_joint_position_to_sim_mask(position=self._reset_joint_pos_wp, env_mask=env_mask_wp)
-        self.hand.write_joint_velocity_to_sim_mask(velocity=self._reset_joint_vel_wp, env_mask=env_mask_wp)
+        self._write_obj_root_pose_mask(root_pose=self._reset_object_pose_wp, env_mask=env_mask_wp)
+        self._write_obj_root_vel_mask(root_velocity=self._reset_object_velocity_wp, env_mask=env_mask_wp)
+        self._set_joint_pos_target_mask(target=self._cur_targets_wp, env_mask=env_mask_wp)
+        self._write_hand_joint_pos_mask(position=self._reset_joint_pos_wp, env_mask=env_mask_wp)
+        self._write_hand_joint_vel_mask(velocity=self._reset_joint_vel_wp, env_mask=env_mask_wp)
 
         # The default reset path reads lazy body pose properties immediately after writes, which forces FK. The fused
         # core does the FK explicitly and then derives the same intermediate tensors into persistent buffers.
