@@ -11,7 +11,9 @@ Branch: `rshahid/newton-perf-iter`
 - `3b4172bff4a Optimize in-hand Newton reset and step kernels`
   - Adds the in-hand fused Warp reset core, fused dones/intermediate kernels, fused reward kernels, and reset CUDA graph support for the pure reset-preparation subset.
 - `365f780a64f Refine in-hand reset writer and mask hooks`
-  - Restores mask writer aliases for readability and adds the base `DirectRLEnv._reset_idx_from_mask()` hook so future supported tasks can consume dense reset masks before `reset_buf.nonzero()`.
+  - Restores mask writer aliases for readability and briefly added a base mask-reset hook.
+- `Remove premature reset mask hook`
+  - Removes the base `DirectRLEnv._reset_idx_from_mask()` hook because it did not yet eliminate `nonzero()` for in-hand and made the generic reset flow harder to read.
 - `cf14f1bd949 Add in-hand reset graph correctness tests`
   - Adds replay-guard, in-hand reset/dones/rewards, Newton rigid-object reset, and kitless wrench-composer coverage.
 
@@ -103,7 +105,7 @@ Sanity from `nsys stats`:
 - Reset CUDA graph capture only covers pure reset-preparation kernels. Asset writer APIs and `sim.forward()` remain outside capture because they update Python-side lazy-buffer/FK state.
 - Reward computation is intentionally two Warp launches, not one, because `consecutive_successes` depends on a grid-wide reduction. A single parallel kernel would either race or serialize.
 - Goal marker visualization is skipped in non-vision headless paths and kept only when renderer/visualizer state can observe it.
-- The new `DirectRLEnv._reset_idx_from_mask()` hook avoids eager `nonzero()` only after a subclass opts in. The current in-hand path does not yet consume the mask in `step()` because exact-env side effects still need careful handling.
+- The premature base `DirectRLEnv._reset_idx_from_mask()` hook was removed. The current in-hand path still converts `reset_buf` to exact `env_ids` before reset because exact-env side effects still need careful handling.
 
 ## Next Work
 
@@ -120,7 +122,7 @@ For the `reset_buf.nonzero()` synchronization:
    - only when reset events/noise/sensors are absent or have mask-safe APIs
    - only when actuators are stateless/no-op for reset, or actuator reset gets mask-safe support
    - reset Newton external wrench composers with the mask
-4. Only then override `_reset_idx_from_mask()` for in-hand. Until that is done, falling back to `nonzero()` is the safer behavior.
+4. Only then add a clear task-level mask reset API for in-hand. Until that is done, falling back to `nonzero()` is the safer behavior.
 
 For broader task support:
 

@@ -458,15 +458,10 @@ class DirectRLEnv(gym.Env):
         self.reward_buf = self._get_rewards()
 
         # -- reset envs that terminated/timed-out and log the episode information
-        reset_consumed = self._reset_idx_from_mask(self.reset_buf)
-        reset_ran = reset_consumed
-        if not reset_consumed:
-            reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1).int()
-            if len(reset_env_ids) > 0:
-                if not self._reset_idx_cuda_graph(reset_env_ids):
-                    self._reset_idx(reset_env_ids)
-                reset_ran = True
-        if reset_ran:
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1).int()
+        if len(reset_env_ids) > 0:
+            if not self._reset_idx_cuda_graph(reset_env_ids):
+                self._reset_idx(reset_env_ids)
             # if sensors are added to the scene, make sure we render to reflect changes in reset
             if self.render_enabled and is_rendering and self.has_rtx_sensors and self.cfg.num_rerenders_on_reset > 0:
                 for _ in range(self.cfg.num_rerenders_on_reset):
@@ -650,18 +645,6 @@ class DirectRLEnv(gym.Env):
             env_ids: List of environment ids which must be reset
         """
         self._reset_idx_common(env_ids)
-
-    def _reset_idx_from_mask(self, reset_mask: torch.Tensor) -> bool:
-        """Try to reset environments directly from a dense reset mask.
-
-        The default implementation returns ``False`` so :meth:`step` materializes reset indices with
-        :meth:`torch.Tensor.nonzero` and calls :meth:`_reset_idx`, preserving the legacy behavior. Subclasses can
-        override this when they can consume ``reset_mask`` without host-visible dynamic shapes.
-
-        Returning ``True`` means the subclass has fully handled all reset side effects for the current mask, including
-        the no-reset case.
-        """
-        return False
 
     def _reset_idx_common(self, env_ids: Sequence[int], *, reset_episode_lengths: bool = True) -> None:
         """Run the shared direct-RL reset sequence.
