@@ -247,6 +247,14 @@ class DirectRLEnvCfg:
       render steps will be performed after each time an environment is reset.
     """
 
+    reset_cuda_graph: str = "off"
+    """CUDA graph reset mode for task implementations that provide a graph-safe reset path.
+
+    Supported values are ``"off"``, ``"auto"``, and ``"force"``. The base direct environment only defines the
+    configuration and fallback hook; each task must still prove its own reset is graph-safe before consuming resets
+    through :meth:`~isaaclab.envs.direct_rl_env.DirectRLEnv._reset_idx_cuda_graph`.
+    """
+
     wait_for_textures: bool = True
     """True to wait for assets to be loaded completely, False otherwise. Defaults to True."""
 

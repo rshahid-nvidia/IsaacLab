@@ -30,6 +30,7 @@ from isaaclab.utils.timer import Timer
 from isaaclab.utils.version import has_kit
 
 from .common import VecEnvObs, VecEnvStepReturn
+from .cuda_graph import CudaGraphReplayGuard, ResetContext
 from .direct_rl_env_cfg import DirectRLEnvCfg
 from .ui import ViewportCameraController
 from .utils.spaces import sample_space, spec_to_gym_space
@@ -40,6 +41,8 @@ if has_kit():
 
 # import logger
 logger = logging.getLogger(__name__)
+
+_RESET_CUDA_GRAPH_MODES = ("off", "auto", "force")
 
 
 class DirectRLEnv(gym.Env):
@@ -237,6 +240,12 @@ class DirectRLEnv(gym.Env):
         self.reset_terminated = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.reset_time_outs = torch.zeros_like(self.reset_terminated)
         self.reset_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.sim.device)
+        self._reset_cuda_graph_mode = self._get_reset_cuda_graph_mode()
+        self._reset_cuda_graph_path_name = "Reset CUDA graph path"
+        self._reset_cuda_graph_enabled = False
+        self._reset_cuda_graph = None
+        self._reset_cuda_graph_disable_reason = ""
+        self._reset_cuda_graph_guard: CudaGraphReplayGuard | None = None
 
         # setup the action and observation spaces for Gym
         self._configure_gym_env_spaces()
@@ -445,13 +454,14 @@ class DirectRLEnv(gym.Env):
         self.common_step_counter += 1  # total step (common for all envs)
 
         self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
-        self.reset_buf = self.reset_terminated | self.reset_time_outs
+        torch.logical_or(self.reset_terminated, self.reset_time_outs, out=self.reset_buf)
         self.reward_buf = self._get_rewards()
 
         # -- reset envs that terminated/timed-out and log the episode information
         reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1).int()
         if len(reset_env_ids) > 0:
-            self._reset_idx(reset_env_ids)
+            if not self._reset_idx_cuda_graph(reset_env_ids):
+                self._reset_idx(reset_env_ids)
             # if sensors are added to the scene, make sure we render to reflect changes in reset
             if self.render_enabled and is_rendering and self.has_rtx_sensors and self.cfg.num_rerenders_on_reset > 0:
                 for _ in range(self.cfg.num_rerenders_on_reset):
@@ -634,22 +644,162 @@ class DirectRLEnv(gym.Env):
         Args:
             env_ids: List of environment ids which must be reset
         """
+        self._reset_idx_common(env_ids)
+
+    def _reset_idx_common(self, env_ids: Sequence[int], *, reset_episode_lengths: bool = True) -> None:
+        """Run the shared direct-RL reset sequence.
+
+        Args:
+            env_ids: Environment ids selected for reset.
+            reset_episode_lengths: Whether to reset :attr:`episode_length_buf` here. Task-specific fused reset paths can
+                set this to ``False`` when they reset episode lengths in their own fused kernel.
+        """
+
         self.scene.reset(env_ids)
 
-        # apply events such as randomization for environments that need a reset
         if self.cfg.events:
             if "reset" in self.event_manager.available_modes:
                 env_step_count = self._sim_step_counter // self.cfg.decimation
                 self.event_manager.apply(mode="reset", env_ids=env_ids, global_env_step_count=env_step_count)
 
-        # reset noise models
         if self.cfg.action_noise_model:
             self._action_noise_model.reset(env_ids)
         if self.cfg.observation_noise_model:
             self._observation_noise_model.reset(env_ids)
 
-        # reset the episode length buffer
-        self.episode_length_buf[env_ids] = 0
+        if reset_episode_lengths:
+            self.episode_length_buf[env_ids] = 0
+
+    def _configure_reset_cuda_graph(self, *, path_name: str = "Reset CUDA graph path") -> None:
+        """Configure an optional subclass-provided CUDA graph reset path.
+
+        Subclasses should call this after their reset buffers and task state are initialized, then implement the
+        small hook surface below. The base method owns mode handling, common safety checks, replay guards, and fallback
+        behavior so task implementations do not need to duplicate the parent reset contract. These checks are only for
+        CUDA graph replay; direct fused kernels should use their own lightweight compatibility checks.
+        """
+
+        self._reset_cuda_graph_mode = self._get_reset_cuda_graph_mode()
+        self._reset_cuda_graph_path_name = path_name
+        self._reset_cuda_graph_enabled = False
+        self._reset_cuda_graph = None
+        self._reset_cuda_graph_disable_reason = ""
+        self._reset_cuda_graph_guard = None
+
+        if self._reset_cuda_graph_mode == "off":
+            return
+
+        reasons = self._get_reset_cuda_graph_blockers()
+        if reasons:
+            self._disable_reset_cuda_graph("; ".join(reasons), log_level=logging.INFO)
+            return
+
+        try:
+            self._setup_reset_cuda_graph_buffers()
+            self._reset_cuda_graph_guard = CudaGraphReplayGuard(
+                tensors=self._reset_cuda_graph_tensors(),
+                values=self._reset_cuda_graph_constants(),
+            )
+            self._warmup_reset_cuda_graph()
+        except Exception as exc:
+            reason = f"setup/warm-up failed: {exc}"
+            if self._reset_cuda_graph_mode == "force":
+                raise RuntimeError(f"{self._reset_cuda_graph_path_name} setup/warm-up failed: {exc}") from exc
+            self._reset_cuda_graph_disable_reason = reason
+            logger.warning("%s disabled: %s", self._reset_cuda_graph_path_name, reason)
+            return
+
+        self._reset_cuda_graph_enabled = True
+        logger.info("%s enabled.", self._reset_cuda_graph_path_name)
+
+    def _get_reset_cuda_graph_blockers(self) -> list[str]:
+        """Return blockers for replaying the base :meth:`_reset_idx` semantics through a CUDA graph path."""
+
+        reasons: list[str] = []
+        if "cuda" not in str(self.device):
+            reasons.append(f"device is not CUDA ({self.device})")
+        if self.cfg.events and "reset" in self.event_manager.available_modes:
+            reasons.append("reset events are configured")
+
+        return reasons
+
+    def _setup_reset_cuda_graph_buffers(self) -> None:
+        """Allocate subclass buffers used by the reset CUDA graph path."""
+
+    def _warmup_reset_cuda_graph(self) -> None:
+        """Launch graph reset kernels once before capture so lazy initialization cannot happen inside capture."""
+
+    def _reset_cuda_graph_tensors(self) -> dict[str, torch.Tensor]:
+        """Return tensors whose storage and metadata must remain stable for reset graph replay."""
+
+        return {"reset_buf": self.reset_buf}
+
+    def _reset_cuda_graph_constants(self) -> dict[str, float | int | str | bool]:
+        """Return scalar values baked into the reset graph capture."""
+
+        return {}
+
+    def _disable_reset_cuda_graph(self, reason: str, *, log_level: int = logging.WARNING) -> bool:
+        """Disable the reset CUDA graph path, or raise if it was explicitly forced."""
+
+        self._reset_cuda_graph_enabled = False
+        self._reset_cuda_graph_disable_reason = reason
+        if self._reset_cuda_graph_mode == "force":
+            raise RuntimeError(f"{self._reset_cuda_graph_path_name} is not safe: {reason}")
+        logger.log(log_level, "%s disabled: %s", self._reset_cuda_graph_path_name, reason)
+        return False
+
+    def _check_reset_cuda_graph_assumptions(self) -> str | None:
+        """Return a replay-guard error if reset graph assumptions no longer hold."""
+
+        if self._reset_cuda_graph_guard is None:
+            return "reset graph guard is not configured"
+        return self._reset_cuda_graph_guard.check(
+            tensors=self._reset_cuda_graph_tensors(),
+            values=self._reset_cuda_graph_constants(),
+        )
+
+    def _reset_idx_cuda_graph(self, env_ids: torch.Tensor) -> bool:
+        """Try to reset environments through a subclass-provided CUDA graph path.
+
+        The default implementation always returns ``False`` so :meth:`_reset_idx` handles the reset. Subclasses that
+        support reset CUDA graphs should override :meth:`_reset_idx_cuda_graph_impl` instead of this method, then let
+        this common wrapper preserve guard checking and fallback behavior.
+
+        Args:
+            env_ids: Environment ids selected for reset, matching the argument passed to :meth:`_reset_idx`.
+
+        Returns:
+            ``True`` when the subclass consumed the reset, otherwise ``False`` to fall back to :meth:`_reset_idx`.
+        """
+        if not self._reset_cuda_graph_enabled:
+            return False
+        graph_state_error = self._check_reset_cuda_graph_assumptions()
+        if graph_state_error is not None:
+            return self._disable_reset_cuda_graph(graph_state_error)
+        reset_mask_wp = getattr(self, "_reset_cuda_graph_mask_wp", None)
+        if reset_mask_wp is None:
+            return self._disable_reset_cuda_graph("reset mask Warp buffer is not configured")
+        ctx = ResetContext(env_ids=env_ids, reset_mask_wp=reset_mask_wp)
+        return self._reset_idx_cuda_graph_impl(ctx)
+
+    def _reset_idx_cuda_graph_impl(self, ctx: ResetContext) -> bool:
+        """Consume a reset through a subclass CUDA graph implementation.
+
+        Subclasses must preserve the observable semantics of :meth:`_reset_idx` for ``ctx.env_ids`` and return
+        ``False`` if they cannot safely consume the reset.
+        """
+        return False
+
+    def _get_reset_cuda_graph_mode(self) -> str:
+        """Return the validated reset CUDA graph mode from the environment config."""
+
+        mode = str(getattr(self.cfg, "reset_cuda_graph", "off")).lower()
+        if mode not in _RESET_CUDA_GRAPH_MODES:
+            raise ValueError(
+                f"Unsupported reset_cuda_graph={mode!r}; expected one of {_RESET_CUDA_GRAPH_MODES}."
+            )
+        return mode
 
     """
     Implementation-specific functions.
