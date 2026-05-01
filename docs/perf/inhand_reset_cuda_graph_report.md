@@ -75,14 +75,7 @@ Confidence:
 
 ## Trace
 
-Latest generated trace:
-
-- `/home/rshahid/Projects/isaac/reset_cuda_graph_force_fused_rewards.nsys-rep`
-- `/home/rshahid/Projects/isaac/reset_cuda_graph_force_fused_rewards.sqlite`
-- `/tmp/nsys_reset_cuda_graph_force_fused_rewards.log`
-- `/tmp/nsys_reset_cuda_graph_force_fused_rewards_json/benchmark_non_rl_Isaac-Repose-Cube-Allegro-Direct-v0_2026-05-01_04-05-59.json`
-
-Trace settings:
+Generated traces with matching settings:
 
 - Task: `Isaac-Repose-Cube-Allegro-Direct-v0`
 - Backend: Newton
@@ -90,14 +83,40 @@ Trace settings:
 - Envs: 1024
 - Frames: 80
 - Capture frames: 30-60
-- `env.reset_cuda_graph=force`
+
+Instrumentation-only baseline at `3027956b2b3`:
+
+- `/home/rshahid/Projects/isaac/reset_instrumentation_baseline.nsys-rep`
+- `/home/rshahid/Projects/isaac/reset_instrumentation_baseline.sqlite`
+- `/tmp/nsys_reset_instrumentation_baseline.log`
+- `/tmp/nsys_reset_instrumentation_baseline_json/benchmark_non_rl_Isaac-Repose-Cube-Allegro-Direct-v0_2026-05-01_05-17-36.json`
+
+Fused Warp kernels with reset CUDA graph disabled (`env.reset_cuda_graph=off`):
+
+- `/home/rshahid/Projects/isaac/reset_fused_warp_no_reset_graph.nsys-rep`
+- `/home/rshahid/Projects/isaac/reset_fused_warp_no_reset_graph.sqlite`
+- `/tmp/nsys_reset_fused_warp_no_reset_graph.log`
+- `/tmp/nsys_reset_fused_warp_no_reset_graph_json/benchmark_non_rl_Isaac-Repose-Cube-Allegro-Direct-v0_2026-05-01_05-18-41.json`
+
+Fused Warp kernels with reset CUDA graph forced (`env.reset_cuda_graph=force`):
+
+- `/home/rshahid/Projects/isaac/reset_cuda_graph_force_fused_rewards.nsys-rep`
+- `/home/rshahid/Projects/isaac/reset_cuda_graph_force_fused_rewards.sqlite`
+- `/tmp/nsys_reset_cuda_graph_force_fused_rewards.log`
+- `/tmp/nsys_reset_cuda_graph_force_fused_rewards_json/benchmark_non_rl_Isaac-Repose-Cube-Allegro-Direct-v0_2026-05-01_04-05-59.json`
+
+Headline benchmark JSON stats:
+
+- Baseline: mean step time 52.50 ms; mean step FPS 27.54; mean effective FPS 28197.67.
+- Fused/no-reset-graph: mean step time 36.72 ms; mean step FPS 30.88; mean effective FPS 31620.33.
+- Fused/reset-graph-force: mean step time 33.82 ms; mean step FPS 33.56; mean effective FPS 34360.48.
 
 Sanity from `nsys stats`:
 
-- `cudaGraphLaunch_v10000`: 150 calls
-- `cudaLaunchKernel`: 3810 calls
-- `cudaStreamSynchronize` dominated CUDA API time
-- NVTX reset ranges were present, including `env.step:_reset_idx` and `env.step:reset_buf.nonzero`
+- Baseline CUDA API calls: `cudaGraphLaunch_v10000` 120; `cudaLaunchKernel` 7459; `cudaStreamSynchronize` 2019.
+- Fused/no-reset-graph CUDA API calls: `cudaGraphLaunch_v10000` 120; `cudaLaunchKernel` 3900; `cudaStreamSynchronize` 1710.
+- Fused/reset-graph-force CUDA API calls: `cudaGraphLaunch_v10000` 150; `cudaLaunchKernel` 3810; `cudaStreamSynchronize` 1680.
+- NVTX reset ranges were present in all traces. Baseline `_reset_idx` averaged 6.63 ms, fused/no-reset-graph `_reset_idx` averaged 2.95 ms, and fused/reset-graph-force `_reset_idx` averaged 2.06 ms.
 
 ## Known Limitations
 
