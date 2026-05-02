@@ -26,6 +26,7 @@ from isaaclab.sim import SimulationContext
 from isaaclab.sim.utils.stage import use_stage
 from isaaclab.utils.configclass import resolve_cfg_presets
 from isaaclab.utils.noise import NoiseModel
+from isaaclab.utils.profiling import nvtx_range_pop, nvtx_range_push
 from isaaclab.utils.seed import configure_seed
 from isaaclab.utils.timer import Timer
 from isaaclab.utils.version import has_kit
@@ -445,39 +446,59 @@ class DirectRLEnv(gym.Env):
         is_rendering = self.sim.is_rendering
 
         # perform physics stepping
-        for _ in range(self.cfg.decimation):
+        for _i_decim in range(self.cfg.decimation):
             self._sim_step_counter += 1
+            nvtx_range_push(f"env.step:decim[{_i_decim}]")
             # set actions into buffers
+            nvtx_range_push("env.step:decim:_apply_action")
             self._apply_action()
+            nvtx_range_pop()
             # set actions into simulator
+            nvtx_range_push("env.step:decim:write_data_to_sim")
             self.scene.write_data_to_sim()
+            nvtx_range_pop()
             # simulate
+            nvtx_range_push("env.step:decim:sim.step")
             self.sim.step(render=False)
+            nvtx_range_pop()
             # render between steps only if the GUI or an RTX sensor needs it.
             # When render_enabled is False, Kit visualizer (camera/GUI) is skipped
             # but standalone visualizers (Newton, Rerun, Viser) still update.
             if self._sim_step_counter % self.cfg.sim.render_interval == 0 and is_rendering:
+                nvtx_range_push("env.step:decim:sim.render")
                 self.sim.render(skip_app_pumping=not self.render_enabled)
+                nvtx_range_pop()
             # update buffers at sim dt
+            nvtx_range_push("env.step:decim:scene.update")
             self.scene.update(dt=self.physics_dt)
+            nvtx_range_pop()
+            nvtx_range_pop()  # decim[i]
 
         # post-step:
         # -- update env counters (used for curriculum generation)
         self.episode_length_buf += 1  # step in current episode (per env)
         self.common_step_counter += 1  # total step (common for all envs)
 
+        nvtx_range_push("env.step:_get_dones")
         self.reset_terminated[:], self.reset_time_outs[:] = self._get_dones()
         torch.logical_or(self.reset_terminated, self.reset_time_outs, out=self.reset_buf)
+        nvtx_range_pop()
+        nvtx_range_push("env.step:_get_rewards")
         self.reward_buf = self._get_rewards()
+        nvtx_range_pop()
 
         # -- reset envs that terminated/timed-out and log the episode information.
+        nvtx_range_push("env.step:_reset_idx")
         reset_env_ids = self._reset_idx_from_reset_buf()
+        nvtx_range_pop()
 
         # if sensors are added to the scene, make sure we render to reflect changes in reset
         if self.render_enabled and is_rendering and self.has_rtx_sensors and self.cfg.num_rerenders_on_reset > 0:
             if len(reset_env_ids) > 0:
+                nvtx_range_push("env.step:rerenders_on_reset")
                 for _ in range(self.cfg.num_rerenders_on_reset):
                     self.sim.render()
+                nvtx_range_pop()
 
         # post-step: step interval event
         if self.cfg.events:
@@ -485,7 +506,9 @@ class DirectRLEnv(gym.Env):
                 self.event_manager.apply(mode="interval", dt=self.step_dt)
 
         # update observations
+        nvtx_range_push("env.step:_get_observations")
         self.obs_buf = self._get_observations()
+        nvtx_range_pop()
 
         # add observation noise
         # note: we apply no noise to the state space (since it is used for critic networks)
@@ -678,7 +701,9 @@ class DirectRLEnv(gym.Env):
         if reset_env_ids is not None:
             return reset_env_ids
 
+        nvtx_range_push("env.step:reset_buf.nonzero")
         reset_env_ids = self._reset_env_ids_from_reset_buf()
+        nvtx_range_pop()
         if len(reset_env_ids) > 0:
             self._reset_idx(reset_env_ids)
         return reset_env_ids

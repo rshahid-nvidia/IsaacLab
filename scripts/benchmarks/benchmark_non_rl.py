@@ -83,11 +83,31 @@ import torch
 
 from isaaclab.envs import DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils.profiling import nvtx_range_pop, nvtx_range_push
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import launch_simulation, resolve_task_config
 
 imports_time_end = time.perf_counter_ns()
+
+
+def _parse_profile_frames() -> tuple[int, int] | None:
+    profile_frames = os.getenv("ISAACLAB_BENCH_PROFILE_FRAMES")
+    if not profile_frames:
+        return None
+    try:
+        start_frame, end_frame = (int(value.strip()) for value in profile_frames.split(",", 1))
+    except ValueError as exc:
+        raise ValueError(
+            "ISAACLAB_BENCH_PROFILE_FRAMES must use '<start>,<end>' integer frame indices."
+        ) from exc
+    if start_frame < 0 or end_frame <= start_frame:
+        raise ValueError("ISAACLAB_BENCH_PROFILE_FRAMES requires 0 <= start < end.")
+    return start_frame, end_frame
+
+
+def _cuda_profiling_available() -> bool:
+    return torch.cuda.is_available()
 
 
 # Create the benchmark
@@ -169,24 +189,44 @@ def main(
     num_frames = 0
     # log frame times
     step_times = []
+    profile_frames = _parse_profile_frames()
+    profiler_active = False
 
     # Run with continuous benchmark monitoring
-    with BenchmarkMonitor(benchmark, interval=1.0):
-        while num_frames < args_cli.num_frames:
-            # get upper and lower bounds of action space, sample actions randomly on this interval
-            action_high = 1
-            action_low = -1
-            actions = (action_high - action_low) * torch.rand(
-                env.unwrapped.num_envs, env.unwrapped.single_action_space.shape[0], device=env.unwrapped.device
-            ) - action_high
+    try:
+        with BenchmarkMonitor(benchmark, interval=1.0):
+            while num_frames < args_cli.num_frames:
+                if profile_frames is not None and num_frames == profile_frames[0] and _cuda_profiling_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.cudart().cudaProfilerStart()
+                    profiler_active = True
+                    print(f"[INFO] CUDA profiler started at benchmark frame {num_frames}.")
 
-            # env stepping
-            env_step_time_begin = time.perf_counter_ns()
-            _ = env.step(actions)
-            end_step_time_end = time.perf_counter_ns()
-            step_times.append(end_step_time_end - env_step_time_begin)
+                # get upper and lower bounds of action space, sample actions randomly on this interval
+                action_high = 1
+                action_low = -1
+                actions = (action_high - action_low) * torch.rand(
+                    env.unwrapped.num_envs, env.unwrapped.single_action_space.shape[0], device=env.unwrapped.device
+                ) - action_high
 
-            num_frames += 1
+                # env stepping
+                nvtx_range_push(f"step_{num_frames}")
+                env_step_time_begin = time.perf_counter_ns()
+                _ = env.step(actions)
+                end_step_time_end = time.perf_counter_ns()
+                nvtx_range_pop()
+                step_times.append(end_step_time_end - env_step_time_begin)
+
+                num_frames += 1
+                if profiler_active and profile_frames is not None and num_frames == profile_frames[1]:
+                    torch.cuda.synchronize()
+                    torch.cuda.cudart().cudaProfilerStop()
+                    profiler_active = False
+                    print(f"[INFO] CUDA profiler stopped at benchmark frame {num_frames}.")
+    finally:
+        if profiler_active:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaProfilerStop()
 
     if world_rank == 0:
         # Final update after loop completes

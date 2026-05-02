@@ -20,6 +20,7 @@ from isaaclab.envs.cuda_graph import ResetContext
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
+from isaaclab.utils.profiling import nvtx_range_pop, nvtx_range_push
 
 if TYPE_CHECKING:
     from isaaclab_tasks.direct.allegro_hand.allegro_hand_env_cfg import AllegroHandEnvCfg
@@ -1260,7 +1261,9 @@ class InHandManipulationEnv(DirectRLEnv):
         if ctx.env_ids is not None:
             return ctx, False
 
+        nvtx_range_push("env.step:reset_buf.nonzero")
         env_ids = ctx.selection.materialize_env_ids(device=self.device)
+        nvtx_range_pop()
         return ctx.with_env_ids(env_ids), True
 
     def _run_inhand_fused_reset(self, ctx: ResetContext, *, use_cuda_graph: bool) -> torch.Tensor | None:

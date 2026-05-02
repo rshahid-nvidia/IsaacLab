@@ -34,6 +34,7 @@ from isaaclab.sim import SimulationContext
 from isaaclab.sim.utils.stage import get_current_stage, get_current_stage_id
 from isaaclab.sim.views import FrameView
 from isaaclab.terrains import TerrainImporter, TerrainImporterCfg
+from isaaclab.utils.profiling import nvtx_range_pop, nvtx_range_push
 from isaaclab.utils.reset import ResetSelection
 
 # Note: This is a temporary import for the VisuoTactileSensorCfg class.
@@ -600,20 +601,33 @@ class InteractiveScene:
         Args:
             dt: The amount of time passed from last :meth:`update` call.
         """
-        # -- assets
+        nvtx_range_push("scene.update:articulations")
         for articulation in self._articulations.values():
             articulation.update(dt)
+        nvtx_range_pop()
+        nvtx_range_push("scene.update:deformables")
         for deformable_object in self._deformable_objects.values():
             deformable_object.update(dt)
+        nvtx_range_pop()
+        nvtx_range_push("scene.update:rigid_objects")
         for rigid_object in self._rigid_objects.values():
             rigid_object.update(dt)
+        nvtx_range_pop()
+        nvtx_range_push("scene.update:rigid_object_collections")
         for rigid_object_collection in self._rigid_object_collections.values():
             rigid_object_collection.update(dt)
+        nvtx_range_pop()
+        nvtx_range_push("scene.update:surface_grippers")
         for surface_gripper in self._surface_grippers.values():
             surface_gripper.update(dt)
+        nvtx_range_pop()
         # -- sensors
+        nvtx_range_push("scene.update:sensors")
         for sensor in self._sensors.values():
+            nvtx_range_push(f"sensor.update:{type(sensor).__name__}")
             sensor.update(dt, force_recompute=not self.cfg.lazy_sensor_update)
+            nvtx_range_pop()
+        nvtx_range_pop()
 
     """
     Operations: Scene State.

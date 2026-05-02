@@ -424,6 +424,32 @@ def test_scene_reset_graph_tensors_prefixes_entity_names():
 
     assert scene.reset_graph_tensors() == {"rigid_object.cube.tensor": graph_aware.tensor}
 
+
+def test_scene_update_nvtx_ranges_noop_without_cuda(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    log = []
+    scene = object.__new__(InteractiveScene)
+    scene.cfg = SimpleNamespace(lazy_sensor_update=False)
+    scene._articulations = {"robot": _UpdateEntity(log, "articulation")}
+    scene._deformable_objects = {"cloth": _UpdateEntity(log, "deformable")}
+    scene._rigid_objects = {"cube": _UpdateEntity(log, "rigid_object")}
+    scene._rigid_object_collections = {"cubes": _UpdateEntity(log, "rigid_object_collection")}
+    scene._surface_grippers = {"gripper": _UpdateEntity(log, "surface_gripper")}
+    scene._sensors = {"sensor": _UpdateSensor(log, "sensor")}
+
+    scene.update(dt=0.125)
+
+    assert log == [
+        ("articulation", 0.125),
+        ("deformable", 0.125),
+        ("rigid_object", 0.125),
+        ("rigid_object_collection", 0.125),
+        ("surface_gripper", 0.125),
+        ("sensor", 0.125, True),
+    ]
+
+
 def test_sensor_base_reset_graph_tensors_reports_base_timestamp_buffers():
     sensor = object.__new__(_DefaultGraphSensor)
     sensor._initialize_handle = None
