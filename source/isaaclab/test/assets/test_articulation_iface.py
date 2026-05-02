@@ -558,6 +558,40 @@ class TestArticulationReset:
         assert not isinstance(calls[0], slice)
         torch.testing.assert_close(calls[0], torch.tensor([1, 3], dtype=torch.long))
 
+    @pytest.mark.skipif("newton" not in BACKENDS, reason="Newton backend is not available.")
+    @pytest.mark.parametrize("method_name", ["reset", "reset_after_graph"])
+    @pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+    def test_newton_env_mask_takes_precedence_over_env_ids_for_actuator_reset(self, method_name, device):
+        if device.startswith("cuda") and not torch.cuda.is_available():
+            pytest.skip("CUDA is not available.")
+
+        art, _ = create_newton_articulation(num_instances=4, num_joints=2, num_bodies=2, device=device)
+        calls = []
+
+        class _FakeActuator:
+            def reset(self, env_ids):
+                calls.append(env_ids)
+
+        class _FakeComposer:
+            def reset_graphable(self, env_ids=None, env_mask=None):
+                pass
+
+            def reset_after_graph(self, env_ids=None, env_mask=None):
+                pass
+
+        art.actuators = {"fake": _FakeActuator()}
+        art._instantaneous_wrench_composer = _FakeComposer()
+        art._permanent_wrench_composer = _FakeComposer()
+
+        env_ids = torch.tensor([0], dtype=torch.int32, device=device)
+        env_mask = wp.array([False, False, True, False], dtype=wp.bool, device=device)
+
+        getattr(art, method_name)(env_ids=env_ids, env_mask=env_mask)
+
+        assert len(calls) == 1
+        assert not isinstance(calls[0], slice)
+        torch.testing.assert_close(calls[0], torch.tensor([2], dtype=torch.long, device=device))
+
 
 class TestArticulationIndexResolution:
     """Test backend-specific index resolution helpers."""

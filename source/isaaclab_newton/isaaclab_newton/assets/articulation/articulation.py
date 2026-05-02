@@ -227,8 +227,8 @@ class Articulation(BaseArticulation):
         """Reset the articulation.
 
         .. caution::
-            If ``env_mask`` is provided without ``env_ids``, actuator reset ids are materialized from the mask.
-            Passing matching ``env_ids`` avoids that host-side materialization in residual reset paths.
+            If ``env_mask`` is provided, it takes precedence over ``env_ids``. Actuator reset ids are materialized
+            from the mask because actuator reset APIs are env-id based.
 
         Args:
             env_ids: Environment indices. If None, then all indices are used.
@@ -256,7 +256,7 @@ class Articulation(BaseArticulation):
         """Reset actuator state using the same env-id convention as the original reset path."""
 
         reset_env_ids = env_ids
-        if reset_env_ids is None and env_mask is not None:
+        if env_mask is not None:
             reset_env_ids = wp.to_torch(env_mask).nonzero(as_tuple=False).squeeze(-1).to(device=self.device)
         if reset_env_ids is None or (isinstance(reset_env_ids, slice) and reset_env_ids == slice(None)):
             reset_env_ids = slice(None)
