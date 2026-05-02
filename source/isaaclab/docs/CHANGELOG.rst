@@ -12,7 +12,9 @@ Added
 * Added reset/CUDA graph helpers: :class:`~isaaclab.envs.cuda_graph.ResetContext`,
   :class:`~isaaclab.envs.cuda_graph.ResetGraphPhase`, :class:`~isaaclab.envs.cuda_graph.CudaGraphReplayGuard`,
   :class:`~isaaclab.envs.cuda_graph.CudaGraphCaptureError`, :class:`~isaaclab.utils.reset.ResetSelection`,
-  and low-level relaxed capture helpers in :mod:`isaaclab.utils.cuda_graph`.
+  low-level relaxed capture helpers in :mod:`isaaclab.utils.cuda_graph`, and
+  :class:`~isaaclab.utils.warp_view_registry.WarpViewRegistry` for declaring Torch-backed Warp views once across
+  refresh, compatibility, and replay-guard paths.
 * Added reusable reset graph orchestration hooks on :class:`~isaaclab.envs.DirectRLEnv`, including
   ``_reset_idx_from_reset_buf()``, ``_reset_idx_common_graphable()``, ``_reset_idx_common_after_graph()``,
   ``_configure_reset_cuda_graph()``, ``_capture_reset_cuda_graph_phase()``,

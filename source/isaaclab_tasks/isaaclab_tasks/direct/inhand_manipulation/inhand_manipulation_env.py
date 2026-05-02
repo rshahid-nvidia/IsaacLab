@@ -21,6 +21,7 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 from isaaclab.utils.profiling import nvtx_range_pop, nvtx_range_push
+from isaaclab.utils.warp_view_registry import CudaGraphTargetRegistry, WarpViewRegistry
 
 if TYPE_CHECKING:
     from isaaclab_tasks.direct.allegro_hand.allegro_hand_env_cfg import AllegroHandEnvCfg
@@ -478,21 +479,14 @@ class InHandManipulationEnv(DirectRLEnv):
             return False
 
     def _setup_inhand_warp_step_buffers(self) -> None:
-        self._episode_length_buf_wp = wp.from_torch(self.episode_length_buf, dtype=wp.int64)
-        self._successes_wp = wp.from_torch(self.successes, dtype=wp.float32)
-        self._last_episode_success_wp = wp.from_torch(self._last_episode_success, dtype=wp.bool)
-        self._consecutive_successes_wp = wp.from_torch(self.consecutive_successes, dtype=wp.float32)
-        self._goal_rot_wp = wp.from_torch(self.goal_rot, dtype=wp.quatf)
-        self._in_hand_pos_wp = wp.from_torch(self.in_hand_pos, dtype=wp.vec3f)
-        self._env_origins_wp = wp.from_torch(self.scene.env_origins, dtype=wp.vec3f)
-        self._reset_terminated_wp = wp.from_torch(self.reset_terminated, dtype=wp.bool)
-        self._reset_time_outs_wp = wp.from_torch(self.reset_time_outs, dtype=wp.bool)
-        self._reset_buf_step_wp = wp.from_torch(self.reset_buf, dtype=wp.bool)
-        self._reset_goal_buf_wp = wp.from_torch(self.reset_goal_buf, dtype=wp.bool)
+        self._inhand_warp_views = WarpViewRegistry(self, device=self.device)
+        self._register_inhand_warp_step_views()
+        self._inhand_warp_views.refresh(groups=("step",))
         self._finger_bodies_wp = wp.array(self.finger_bodies, dtype=wp.int32, device=self.device)
 
         self.reward_buf = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._reward_buf_wp = wp.from_torch(self.reward_buf, dtype=wp.float32)
+        self._register_inhand_reward_views()
+        self._inhand_warp_views.refresh(groups=("reward",))
         self._reward_reset_count_terms_wp = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
         self._reward_finished_success_terms_wp = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
         self._reward_goal_reset_terms_wp = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
@@ -530,11 +524,189 @@ class InHandManipulationEnv(DirectRLEnv):
 
         self._refresh_inhand_warp_step_buffers()
 
+    def _register_inhand_warp_step_views(self) -> None:
+        views = self._inhand_warp_views
+        views.register_torch_view(
+            "episode_length_buf",
+            lambda: self.episode_length_buf,
+            warp_attr="_episode_length_buf_wp",
+            warp_dtype=wp.int64,
+            torch_dtype=torch.int64,
+            expected_shape=(self.num_envs,),
+            groups=("step", "reset", "reset_graph"),
+        )
+        views.register_torch_view(
+            "successes",
+            lambda: self.successes,
+            warp_attr="_successes_wp",
+            warp_dtype=wp.float32,
+            torch_dtype=torch.float32,
+            expected_shape=(self.num_envs,),
+            groups=("step", "reset", "reset_graph"),
+        )
+        views.register_torch_view(
+            "last_episode_success",
+            lambda: self._last_episode_success,
+            warp_attr="_last_episode_success_wp",
+            warp_dtype=wp.bool,
+            torch_dtype=torch.bool,
+            expected_shape=(self.num_envs,),
+            groups=("reset", "reset_graph"),
+        )
+        views.register_torch_view(
+            "consecutive_successes",
+            lambda: self.consecutive_successes,
+            warp_attr="_consecutive_successes_wp",
+            warp_dtype=wp.float32,
+            torch_dtype=torch.float32,
+            expected_shape=(1,),
+            groups=("step",),
+            track_torch=False,
+            track_warp=False,
+        )
+        views.register_torch_view(
+            "goal_rot",
+            lambda: self.goal_rot,
+            warp_attr="_goal_rot_wp",
+            warp_dtype=wp.quatf,
+            torch_dtype=torch.float32,
+            expected_shape=(self.num_envs, 4),
+            groups=("step", "reset", "reset_graph"),
+        )
+        views.register_torch_view(
+            "in_hand_pos",
+            lambda: self.in_hand_pos,
+            warp_attr="_in_hand_pos_wp",
+            warp_dtype=wp.vec3f,
+            torch_dtype=torch.float32,
+            expected_shape=(self.num_envs, 3),
+            groups=("step",),
+            track_torch=False,
+            track_warp=False,
+        )
+        views.register_torch_view(
+            "scene.env_origins",
+            lambda: self.scene.env_origins,
+            warp_attr="_env_origins_wp",
+            warp_dtype=wp.vec3f,
+            torch_dtype=torch.float32,
+            expected_shape=(self.num_envs, 3),
+            groups=("step", "reset", "reset_graph"),
+        )
+        views.register_torch_view(
+            "reset_terminated",
+            lambda: self.reset_terminated,
+            warp_attr="_reset_terminated_wp",
+            warp_dtype=wp.bool,
+            torch_dtype=torch.bool,
+            expected_shape=(self.num_envs,),
+            groups=("step",),
+            track_torch=False,
+            track_warp=False,
+        )
+        views.register_torch_view(
+            "reset_time_outs",
+            lambda: self.reset_time_outs,
+            warp_attr="_reset_time_outs_wp",
+            warp_dtype=wp.bool,
+            torch_dtype=torch.bool,
+            expected_shape=(self.num_envs,),
+            groups=("step",),
+            track_torch=False,
+            track_warp=False,
+        )
+        views.register_torch_view(
+            "reset_buf",
+            lambda: self.reset_buf,
+            warp_attr="_reset_buf_step_wp",
+            warp_dtype=wp.bool,
+            torch_dtype=torch.bool,
+            expected_shape=(self.num_envs,),
+            groups=("step",),
+            track_torch=False,
+            track_warp=False,
+        )
+        views.register_torch_view(
+            "reset_goal_buf",
+            lambda: self.reset_goal_buf,
+            warp_attr="_reset_goal_buf_wp",
+            warp_dtype=wp.bool,
+            torch_dtype=torch.bool,
+            expected_shape=(self.num_envs,),
+            groups=("step", "reset", "reset_graph"),
+        )
+        self._register_inhand_state_views()
+
+    def _register_inhand_reward_views(self) -> None:
+        self._inhand_warp_views.register_torch_view(
+            "reward_buf",
+            lambda: self.reward_buf,
+            warp_attr="_reward_buf_wp",
+            warp_dtype=wp.float32,
+            torch_dtype=torch.float32,
+            expected_shape=(self.num_envs,),
+            groups=("step", "reward"),
+            track_torch=False,
+            track_warp=False,
+        )
+
+    def _register_inhand_state_views(self) -> None:
+        views = self._inhand_warp_views
+        views.register_existing_view(
+            "hand.body_link_pose_w",
+            lambda: self.hand.data.body_link_pose_w.torch,
+            lambda: self.hand.data.body_link_pose_w.warp,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, len(self.hand.body_names), 7),
+            groups=("step", "state", "reset_graph"),
+            warp_attr="_hand_body_pose_w_wp",
+            warp_name="hand.body_link_pose_w",
+        )
+        views.register_existing_view(
+            "hand.body_com_vel_w",
+            lambda: self.hand.data.body_com_vel_w.torch,
+            lambda: self.hand.data.body_com_vel_w.warp,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, len(self.hand.body_names), 6),
+            groups=("step", "state", "reset_graph"),
+            warp_attr="_hand_body_vel_w_wp",
+            warp_name="hand.body_com_vel_w",
+        )
+        views.register_existing_view(
+            "object.root_link_pose_w",
+            lambda: self.object.data.root_link_pose_w.torch,
+            lambda: self.object.data.root_link_pose_w.warp,
+            torch_dtype=torch.float32,
+            expected_shape=(self.num_envs, 7),
+            groups=("step", "state", "reset_graph"),
+            warp_attr="_object_root_pose_w_wp",
+        )
+        views.register_existing_view(
+            "object.root_com_vel_w",
+            lambda: self.object.data.root_com_vel_w.torch,
+            lambda: self.object.data.root_com_vel_w.warp,
+            torch_dtype=torch.float32,
+            expected_shape=(self.num_envs, 6),
+            groups=("step", "state", "reset_graph"),
+            warp_attr="_object_root_vel_w_wp",
+        )
+
+    def _check_inhand_warp_step_compatibility(self) -> str | None:
+        """Return why direct Warp step kernels cannot run, ignoring CUDA graph replay stability."""
+
+        if not self._inhand_warp_state_buffers_available():
+            return "required Warp state buffers are not available"
+        return self._inhand_warp_views.check_compatibility(groups=("step", "reward"))
+
+    def _refresh_inhand_warp_step_buffers(self) -> None:
+        """Refresh Warp views for direct kernels after possible Torch tensor rebinding."""
+
+        self._inhand_warp_views.refresh(groups=("step", "reward", "state"))
+
     def _refresh_inhand_warp_state_inputs(self) -> None:
-        self._hand_body_pose_w_wp = self.hand.data.body_link_pose_w.warp
-        self._hand_body_vel_w_wp = self.hand.data.body_com_vel_w.warp
-        self._object_root_pose_w_wp = self.object.data.root_link_pose_w.warp
-        self._object_root_vel_w_wp = self.object.data.root_com_vel_w.warp
+        """Refresh backend-owned Warp state views after simulation writes or FK."""
+
+        self._inhand_warp_views.refresh(groups=("state",))
 
     def _check_inhand_warp_tensor(
         self,
@@ -544,6 +716,8 @@ class InHandManipulationEnv(DirectRLEnv):
         shape: tuple[int, ...],
         dtype: torch.dtype,
     ) -> str | None:
+        """Return why a transient tensor cannot be consumed by the in-hand Warp kernels."""
+
         if not torch.is_tensor(tensor):
             return f"{name} is not a torch.Tensor"
         if tuple(tensor.shape) != shape:
@@ -553,62 +727,6 @@ class InHandManipulationEnv(DirectRLEnv):
         if tensor.device != torch.device(self.device):
             return f"{name} device changed from {self.device} to {tensor.device}"
         return None
-
-    def _check_inhand_warp_step_compatibility(self) -> str | None:
-        """Return why direct Warp step kernels cannot run, ignoring CUDA graph replay stability."""
-
-        if not self._inhand_warp_state_buffers_available():
-            return "required Warp state buffers are not available"
-
-        tensor_specs = (
-            ("episode_length_buf", self.episode_length_buf, (self.num_envs,), torch.int64),
-            ("reset_terminated", self.reset_terminated, (self.num_envs,), torch.bool),
-            ("reset_time_outs", self.reset_time_outs, (self.num_envs,), torch.bool),
-            ("reset_buf", self.reset_buf, (self.num_envs,), torch.bool),
-            ("reward_buf", self.reward_buf, (self.num_envs,), torch.float32),
-            ("reset_goal_buf", self.reset_goal_buf, (self.num_envs,), torch.bool),
-            ("successes", self.successes, (self.num_envs,), torch.float32),
-            ("consecutive_successes", self.consecutive_successes, (1,), torch.float32),
-            ("goal_rot", self.goal_rot, (self.num_envs, 4), torch.float32),
-            ("in_hand_pos", self.in_hand_pos, (self.num_envs, 3), torch.float32),
-            ("scene.env_origins", self.scene.env_origins, (self.num_envs, 3), torch.float32),
-            (
-                "hand.body_link_pose_w",
-                self.hand.data.body_link_pose_w.torch,
-                (self.num_envs, len(self.hand.body_names), 7),
-                torch.float32,
-            ),
-            (
-                "hand.body_com_vel_w",
-                self.hand.data.body_com_vel_w.torch,
-                (self.num_envs, len(self.hand.body_names), 6),
-                torch.float32,
-            ),
-            ("object.root_link_pose_w", self.object.data.root_link_pose_w.torch, (self.num_envs, 7), torch.float32),
-            ("object.root_com_vel_w", self.object.data.root_com_vel_w.torch, (self.num_envs, 6), torch.float32),
-        )
-        for name, tensor, shape, dtype in tensor_specs:
-            reason = self._check_inhand_warp_tensor(name, tensor, shape=shape, dtype=dtype)
-            if reason is not None:
-                return reason
-        return None
-
-    def _refresh_inhand_warp_step_buffers(self) -> None:
-        """Refresh Warp views for direct kernels after possible Torch tensor rebinding."""
-
-        self._episode_length_buf_wp = wp.from_torch(self.episode_length_buf, dtype=wp.int64)
-        self._successes_wp = wp.from_torch(self.successes, dtype=wp.float32)
-        self._last_episode_success_wp = wp.from_torch(self._last_episode_success, dtype=wp.bool)
-        self._consecutive_successes_wp = wp.from_torch(self.consecutive_successes, dtype=wp.float32)
-        self._goal_rot_wp = wp.from_torch(self.goal_rot, dtype=wp.quatf)
-        self._in_hand_pos_wp = wp.from_torch(self.in_hand_pos, dtype=wp.vec3f)
-        self._env_origins_wp = wp.from_torch(self.scene.env_origins, dtype=wp.vec3f)
-        self._reset_terminated_wp = wp.from_torch(self.reset_terminated, dtype=wp.bool)
-        self._reset_time_outs_wp = wp.from_torch(self.reset_time_outs, dtype=wp.bool)
-        self._reset_buf_step_wp = wp.from_torch(self.reset_buf, dtype=wp.bool)
-        self._reset_goal_buf_wp = wp.from_torch(self.reset_goal_buf, dtype=wp.bool)
-        self._reward_buf_wp = wp.from_torch(self.reward_buf, dtype=wp.float32)
-        self._refresh_inhand_warp_state_inputs()
 
     def _require_inhand_warp_step(self, context: str) -> None:
         """Validate direct Warp step kernels and refresh their Torch-backed Warp views."""
@@ -628,12 +746,8 @@ class InHandManipulationEnv(DirectRLEnv):
             return
 
         self._reset_env_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._reset_env_mask_wp = wp.from_torch(self._reset_env_mask, dtype=wp.bool)
-        self._lower_limits_wp = wp.from_torch(self.hand_dof_lower_limits, dtype=wp.float32)
-        self._upper_limits_wp = wp.from_torch(self.hand_dof_upper_limits, dtype=wp.float32)
-        self._prev_targets_wp = wp.from_torch(self.prev_targets, dtype=wp.float32)
-        self._cur_targets_wp = wp.from_torch(self.cur_targets, dtype=wp.float32)
-        self._hand_dof_targets_wp = wp.from_torch(self.hand_dof_targets, dtype=wp.float32)
+        self._register_inhand_fused_reset_views()
+        self._inhand_warp_views.refresh(groups=("reset",))
 
         self._reset_rng_state_wp = wp.zeros(self.num_envs, dtype=wp.uint32, device=self.device)
         self._reseed_inhand_warp_rng(0 if self.cfg.seed is None else int(self.cfg.seed))
@@ -648,8 +762,134 @@ class InHandManipulationEnv(DirectRLEnv):
         self._reset_object_velocity_wp = wp.zeros(self.num_envs, dtype=wp.spatial_vectorf, device=self.device)
         self._reset_joint_pos_wp = wp.zeros((self.num_envs, self.num_hand_dofs), dtype=wp.float32, device=self.device)
         self._reset_joint_vel_wp = wp.zeros((self.num_envs, self.num_hand_dofs), dtype=wp.float32, device=self.device)
+        self._register_inhand_reset_graph_targets()
         self._refresh_inhand_reset_torch_views()
         self._inhand_fused_reset_buffers_ready = True
+
+    def _register_inhand_fused_reset_views(self) -> None:
+        views = self._inhand_warp_views
+        views.register_torch_view(
+            "reset_env_mask",
+            lambda: self._reset_env_mask,
+            warp_attr="_reset_env_mask_wp",
+            warp_dtype=wp.bool,
+            torch_dtype=torch.bool,
+            expected_shape=(self.num_envs,),
+            groups=("reset",),
+            track_torch=False,
+            track_warp=False,
+        )
+        views.register_torch_view(
+            "hand_dof_lower_limits",
+            lambda: self.hand_dof_lower_limits,
+            warp_attr="_lower_limits_wp",
+            warp_dtype=wp.float32,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, self.num_hand_dofs),
+            groups=("reset", "reset_graph"),
+            warp_name="lower_limits_wp",
+        )
+        views.register_torch_view(
+            "hand_dof_upper_limits",
+            lambda: self.hand_dof_upper_limits,
+            warp_attr="_upper_limits_wp",
+            warp_dtype=wp.float32,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, self.num_hand_dofs),
+            groups=("reset", "reset_graph"),
+            warp_name="upper_limits_wp",
+        )
+        views.register_torch_view(
+            "prev_targets",
+            lambda: self.prev_targets,
+            warp_attr="_prev_targets_wp",
+            warp_dtype=wp.float32,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, self.num_hand_dofs),
+            groups=("reset", "reset_graph"),
+        )
+        views.register_torch_view(
+            "cur_targets",
+            lambda: self.cur_targets,
+            warp_attr="_cur_targets_wp",
+            warp_dtype=wp.float32,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, self.num_hand_dofs),
+            groups=("reset", "reset_graph"),
+        )
+        views.register_torch_view(
+            "hand_dof_targets",
+            lambda: self.hand_dof_targets,
+            warp_attr="_hand_dof_targets_wp",
+            warp_dtype=wp.float32,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, self.num_hand_dofs),
+            groups=("reset", "reset_graph"),
+        )
+        views.register_existing_view(
+            "object.default_root_pose",
+            lambda: self.object.data.default_root_pose.torch,
+            lambda: self.object.data.default_root_pose.warp,
+            torch_dtype=torch.float32,
+            expected_shape=(self.num_envs, 7),
+            groups=("reset", "reset_graph"),
+            track_torch=True,
+            warp_name="object.default_root_pose_wp",
+        )
+        views.register_existing_view(
+            "hand.default_joint_pos",
+            lambda: self.hand.data.default_joint_pos.torch,
+            lambda: self.hand.data.default_joint_pos.warp,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, self.num_hand_dofs),
+            groups=("reset", "reset_graph"),
+            track_torch=True,
+            warp_name="hand.default_joint_pos_wp",
+        )
+        views.register_existing_view(
+            "hand.default_joint_vel",
+            lambda: self.hand.data.default_joint_vel.torch,
+            lambda: self.hand.data.default_joint_vel.warp,
+            torch_dtype=torch.float32,
+            expected_shape=lambda: (self.num_envs, self.num_hand_dofs),
+            groups=("reset", "reset_graph"),
+            track_torch=True,
+            warp_name="hand.default_joint_vel_wp",
+        )
+
+    def _register_inhand_reset_graph_targets(self) -> None:
+        targets = CudaGraphTargetRegistry()
+        targets.update(
+            {
+                "reset_mask_wp": lambda: self._reset_cuda_graph_mask_wp,
+                "reset_rng_state": lambda: self._reset_rng_state_wp,
+                "reset_count": lambda: self._reset_count_wp,
+                "reset_success_count": lambda: self._reset_success_count_wp,
+                "finger_bodies": lambda: self._finger_bodies_wp,
+                "reset_object_pose": lambda: self._reset_object_pose_wp,
+                "reset_object_velocity": lambda: self._reset_object_velocity_wp,
+                "reset_joint_pos": lambda: self._reset_joint_pos_wp,
+                "reset_joint_vel": lambda: self._reset_joint_vel_wp,
+                "graph_fingertip_pos": lambda: self._graph_fingertip_pos_wp,
+                "graph_fingertip_rot": lambda: self._graph_fingertip_rot_wp,
+                "graph_fingertip_velocities": lambda: self._graph_fingertip_velocities_wp,
+                "graph_object_pos": lambda: self._graph_object_pos_wp,
+                "graph_object_rot": lambda: self._graph_object_rot_wp,
+                "graph_object_velocities": lambda: self._graph_object_velocities_wp,
+                "graph_object_linvel": lambda: self._graph_object_linvel_wp,
+                "graph_object_angvel": lambda: self._graph_object_angvel_wp,
+                "object.body_com_acc_w": lambda: self.object.data._body_com_acc_w.data,
+                "object.root_view.articulation_ids": lambda: self.object.root_view.articulation_ids,
+                "hand.root_view.articulation_ids": lambda: self.hand.root_view.articulation_ids,
+                "hand.all_joint_mask": lambda: self.hand._ALL_JOINT_MASK,
+                "hand.joint_pos_target": lambda: self.hand.data._joint_pos_target,
+                "hand.joint_pos": lambda: self.hand.data.joint_pos.warp,
+                "hand.joint_vel": lambda: self.hand.data.joint_vel.warp,
+                "hand.previous_joint_vel": lambda: self.hand.data._previous_joint_vel,
+                "hand.joint_acc": lambda: self.hand.data._joint_acc.data,
+            }
+        )
+        self._inhand_reset_graph_targets = targets
 
     def _refresh_inhand_reset_torch_views(self) -> None:
         """Refresh Torch views for Warp-owned reset buffers after possible Warp array rebinding."""
@@ -691,70 +931,8 @@ class InHandManipulationEnv(DirectRLEnv):
         """Return tensors whose storage and metadata must remain stable for reset graph replay."""
 
         tensors = super()._reset_cuda_graph_tensors()
-        tensors.update(
-            {
-                "episode_length_buf": self.episode_length_buf,
-                "successes": self.successes,
-                "last_episode_success": self._last_episode_success,
-                "reset_goal_buf": self.reset_goal_buf,
-                "goal_rot": self.goal_rot,
-                "scene.env_origins": self.scene.env_origins,
-                "hand_dof_lower_limits": self.hand_dof_lower_limits,
-                "hand_dof_upper_limits": self.hand_dof_upper_limits,
-                "prev_targets": self.prev_targets,
-                "cur_targets": self.cur_targets,
-                "hand_dof_targets": self.hand_dof_targets,
-                "reset_mask_wp": self._reset_cuda_graph_mask_wp,
-                "reset_rng_state": self._reset_rng_state_wp,
-                "reset_count": self._reset_count_wp,
-                "reset_success_count": self._reset_success_count_wp,
-                "finger_bodies": self._finger_bodies_wp,
-                "episode_length_buf_wp": self._episode_length_buf_wp,
-                "successes_wp": self._successes_wp,
-                "last_episode_success_wp": self._last_episode_success_wp,
-                "reset_goal_buf_wp": self._reset_goal_buf_wp,
-                "goal_rot_wp": self._goal_rot_wp,
-                "env_origins_wp": self._env_origins_wp,
-                "lower_limits_wp": self._lower_limits_wp,
-                "upper_limits_wp": self._upper_limits_wp,
-                "prev_targets_wp": self._prev_targets_wp,
-                "cur_targets_wp": self._cur_targets_wp,
-                "hand_dof_targets_wp": self._hand_dof_targets_wp,
-                "object.default_root_pose": self.object.data.default_root_pose.torch,
-                "object.default_root_pose_wp": self.object.data.default_root_pose.warp,
-                "hand.default_joint_pos": self.hand.data.default_joint_pos.torch,
-                "hand.default_joint_pos_wp": self.hand.data.default_joint_pos.warp,
-                "hand.default_joint_vel": self.hand.data.default_joint_vel.torch,
-                "hand.default_joint_vel_wp": self.hand.data.default_joint_vel.warp,
-                "reset_object_pose": self._reset_object_pose_wp,
-                "reset_object_velocity": self._reset_object_velocity_wp,
-                "reset_joint_pos": self._reset_joint_pos_wp,
-                "reset_joint_vel": self._reset_joint_vel_wp,
-                "hand.body_link_pose_w": self._hand_body_pose_w_wp,
-                "hand.body_com_vel_w": self._hand_body_vel_w_wp,
-                "object.root_link_pose_w_wp": self._object_root_pose_w_wp,
-                "object.root_com_vel_w_wp": self._object_root_vel_w_wp,
-                "graph_fingertip_pos": self._graph_fingertip_pos_wp,
-                "graph_fingertip_rot": self._graph_fingertip_rot_wp,
-                "graph_fingertip_velocities": self._graph_fingertip_velocities_wp,
-                "graph_object_pos": self._graph_object_pos_wp,
-                "graph_object_rot": self._graph_object_rot_wp,
-                "graph_object_velocities": self._graph_object_velocities_wp,
-                "graph_object_linvel": self._graph_object_linvel_wp,
-                "graph_object_angvel": self._graph_object_angvel_wp,
-                "object.root_link_pose_w": self.object.data.root_link_pose_w.warp,
-                "object.root_com_vel_w": self.object.data.root_com_vel_w.warp,
-                "object.body_com_acc_w": self.object.data._body_com_acc_w.data,
-                "object.root_view.articulation_ids": self.object.root_view.articulation_ids,
-                "hand.root_view.articulation_ids": self.hand.root_view.articulation_ids,
-                "hand.all_joint_mask": self.hand._ALL_JOINT_MASK,
-                "hand.joint_pos_target": self.hand.data._joint_pos_target,
-                "hand.joint_pos": self.hand.data.joint_pos.warp,
-                "hand.joint_vel": self.hand.data.joint_vel.warp,
-                "hand.previous_joint_vel": self.hand.data._previous_joint_vel,
-                "hand.joint_acc": self.hand.data._joint_acc.data,
-            }
-        )
+        tensors.update(self._inhand_warp_views.graph_tensors(groups=("reset_graph",)))
+        tensors.update(self._inhand_reset_graph_targets.tensors())
         physics_manager = self.sim.physics_manager
         if getattr(physics_manager, "_world_reset_mask", None) is not None:
             tensors["physics.world_reset_mask"] = physics_manager._world_reset_mask
@@ -811,50 +989,12 @@ class InHandManipulationEnv(DirectRLEnv):
         if blockers:
             return "; ".join(blockers)
 
-        tensor_specs = (
-            ("reset_env_mask", self._reset_env_mask, (self.num_envs,), torch.bool),
-            ("episode_length_buf", self.episode_length_buf, (self.num_envs,), torch.int64),
-            ("successes", self.successes, (self.num_envs,), torch.float32),
-            ("last_episode_success", self._last_episode_success, (self.num_envs,), torch.bool),
-            ("reset_goal_buf", self.reset_goal_buf, (self.num_envs,), torch.bool),
-            ("goal_rot", self.goal_rot, (self.num_envs, 4), torch.float32),
-            ("scene.env_origins", self.scene.env_origins, (self.num_envs, 3), torch.float32),
-            ("hand_dof_lower_limits", self.hand_dof_lower_limits, (self.num_envs, self.num_hand_dofs), torch.float32),
-            ("hand_dof_upper_limits", self.hand_dof_upper_limits, (self.num_envs, self.num_hand_dofs), torch.float32),
-            ("prev_targets", self.prev_targets, (self.num_envs, self.num_hand_dofs), torch.float32),
-            ("cur_targets", self.cur_targets, (self.num_envs, self.num_hand_dofs), torch.float32),
-            ("hand_dof_targets", self.hand_dof_targets, (self.num_envs, self.num_hand_dofs), torch.float32),
-            ("object.default_root_pose", self.object.data.default_root_pose.torch, (self.num_envs, 7), torch.float32),
-            (
-                "hand.default_joint_pos",
-                self.hand.data.default_joint_pos.torch,
-                (self.num_envs, self.num_hand_dofs),
-                torch.float32,
-            ),
-            (
-                "hand.default_joint_vel",
-                self.hand.data.default_joint_vel.torch,
-                (self.num_envs, self.num_hand_dofs),
-                torch.float32,
-            ),
-        )
-        for name, tensor, shape, dtype in tensor_specs:
-            reason = self._check_inhand_warp_tensor(name, tensor, shape=shape, dtype=dtype)
-            if reason is not None:
-                return reason
-        return None
+        return self._inhand_warp_views.check_compatibility(groups=("reset",))
 
     def _refresh_inhand_fused_reset_buffers(self) -> None:
         """Refresh Torch-backed Warp views used by direct fused reset kernels."""
 
-        self._reset_env_mask_wp = wp.from_torch(self._reset_env_mask, dtype=wp.bool)
-        self._last_episode_success_wp = wp.from_torch(self._last_episode_success, dtype=wp.bool)
-        self._reset_goal_buf_wp = wp.from_torch(self.reset_goal_buf, dtype=wp.bool)
-        self._lower_limits_wp = wp.from_torch(self.hand_dof_lower_limits, dtype=wp.float32)
-        self._upper_limits_wp = wp.from_torch(self.hand_dof_upper_limits, dtype=wp.float32)
-        self._prev_targets_wp = wp.from_torch(self.prev_targets, dtype=wp.float32)
-        self._cur_targets_wp = wp.from_torch(self.cur_targets, dtype=wp.float32)
-        self._hand_dof_targets_wp = wp.from_torch(self.hand_dof_targets, dtype=wp.float32)
+        self._inhand_warp_views.refresh(groups=("reset",))
 
     def _require_inhand_fused_reset(self, context: str) -> None:
         """Validate direct fused reset kernels and refresh their Torch-backed Warp views."""

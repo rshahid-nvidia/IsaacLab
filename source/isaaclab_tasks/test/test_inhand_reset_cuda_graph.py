@@ -1795,6 +1795,43 @@ def test_reset_cuda_graph_force_raises_when_recapture_fails(monkeypatch):
             gym_env.close()
 
 
+def test_inhand_reset_graph_guard_targets_are_registry_backed():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
+
+    cfg = _make_newton_cfg(_ALLEGRO_TASK, num_envs=4)
+    cfg.reset_cuda_graph = "off"
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_ALLEGRO_TASK, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            gym_env.reset()
+            env._setup_reset_cuda_graph_buffers()
+            tensors = env._reset_cuda_graph_tensors()
+
+            expected = {
+                "prev_targets",
+                "prev_targets_wp",
+                "hand.default_joint_pos",
+                "hand.default_joint_pos_wp",
+                "hand.body_link_pose_w",
+                "reset_mask_wp",
+                "reset_rng_state",
+                "reset_object_pose",
+                "hand.joint_pos_target",
+            }
+            assert expected <= set(tensors)
+        finally:
+            gym_env.close()
+
+
 def test_reset_cuda_graph_force_rejects_incompatible_graph_assumption_change():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
