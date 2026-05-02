@@ -869,6 +869,14 @@ class DirectRLEnv(gym.Env):
 
         return self._try_reset_idx_cuda_graph(env_ids) is not None
 
+    def _set_reset_buf_from_env_ids(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Set :attr:`reset_buf` from explicit reset ids and return normalized ids."""
+
+        env_ids = env_ids.to(device=self.device, dtype=torch.int32)
+        self.reset_buf.zero_()
+        self.reset_buf[env_ids.to(dtype=torch.long)] = True
+        return env_ids
+
     def _try_reset_idx_cuda_graph(self, env_ids: torch.Tensor | None = None) -> torch.Tensor | None:
         """Try to reset environments through a subclass-provided CUDA graph path.
 
@@ -895,6 +903,8 @@ class DirectRLEnv(gym.Env):
         if reset_mask_wp is None:
             self._disable_reset_cuda_graph("reset mask Warp buffer is not configured")
             return None
+        if env_ids is not None:
+            env_ids = self._set_reset_buf_from_env_ids(env_ids)
         ctx = ResetContext(env_ids=env_ids, reset_mask_wp=reset_mask_wp)
         return self._reset_idx_cuda_graph_impl(ctx)
 

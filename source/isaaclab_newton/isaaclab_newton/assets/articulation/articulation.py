@@ -227,13 +227,14 @@ class Articulation(BaseArticulation):
         """Reset the articulation.
 
         .. caution::
-            If both `env_ids` and `env_mask` are provided, then `env_mask` takes precedence over `env_ids`.
+            If ``env_mask`` is provided without ``env_ids``, actuator reset ids are materialized from the mask.
+            Passing matching ``env_ids`` avoids that host-side materialization in residual reset paths.
 
         Args:
             env_ids: Environment indices. If None, then all indices are used.
             env_mask: Environment mask. If None, then all the instances are updated. Shape is (num_instances,).
         """
-        self._reset_actuators(env_ids)
+        self._reset_actuators(env_ids=env_ids, env_mask=env_mask)
         self.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         self._reset_wrench_composer_after_graph(env_ids=env_ids, env_mask=env_mask)
 
@@ -246,14 +247,18 @@ class Articulation(BaseArticulation):
     def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
         """Run reset work that remains outside CUDA graph replay."""
 
-        self._reset_actuators(env_ids)
+        self._reset_actuators(env_ids=env_ids, env_mask=env_mask)
         self._reset_wrench_composer_after_graph(env_ids=env_ids, env_mask=env_mask)
 
-    def _reset_actuators(self, env_ids: Sequence[int] | None = None) -> None:
+    def _reset_actuators(
+        self, env_ids: Sequence[int] | torch.Tensor | None = None, env_mask: wp.array | None = None
+    ) -> None:
         """Reset actuator state using the same env-id convention as the original reset path."""
 
         reset_env_ids = env_ids
-        if (reset_env_ids is None) or (reset_env_ids == slice(None)):
+        if reset_env_ids is None and env_mask is not None:
+            reset_env_ids = wp.to_torch(env_mask).nonzero(as_tuple=False).squeeze(-1).to(device=self.device)
+        if reset_env_ids is None or (isinstance(reset_env_ids, slice) and reset_env_ids == slice(None)):
             reset_env_ids = slice(None)
         for actuator in self.actuators.values():
             actuator.reset(reset_env_ids)

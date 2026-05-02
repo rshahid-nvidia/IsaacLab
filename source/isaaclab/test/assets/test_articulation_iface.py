@@ -526,6 +526,39 @@ _index_resolution_backends = pytest.mark.parametrize(
 # ---------------------------------------------------------------------------
 
 
+class TestArticulationReset:
+    """Test reset contracts shared by backend-specific articulation implementations."""
+
+    @pytest.mark.skipif("newton" not in BACKENDS, reason="Newton backend is not available.")
+    @pytest.mark.parametrize("method_name", ["reset", "reset_after_graph"])
+    def test_newton_mask_only_reset_does_not_reset_all_actuator_envs(self, method_name):
+        art, _ = create_newton_articulation(num_instances=4, num_joints=2, num_bodies=2, device="cpu")
+        calls = []
+
+        class _FakeActuator:
+            def reset(self, env_ids):
+                calls.append(env_ids)
+
+        class _FakeComposer:
+            def reset_graphable(self, env_ids=None, env_mask=None):
+                pass
+
+            def reset_after_graph(self, env_ids=None, env_mask=None):
+                pass
+
+        art.actuators = {"fake": _FakeActuator()}
+        art._instantaneous_wrench_composer = _FakeComposer()
+        art._permanent_wrench_composer = _FakeComposer()
+
+        env_mask = wp.array([False, True, False, True], dtype=wp.bool, device="cpu")
+
+        getattr(art, method_name)(env_mask=env_mask)
+
+        assert len(calls) == 1
+        assert not isinstance(calls[0], slice)
+        torch.testing.assert_close(calls[0], torch.tensor([1, 3], dtype=torch.long))
+
+
 class TestArticulationIndexResolution:
     """Test backend-specific index resolution helpers."""
 

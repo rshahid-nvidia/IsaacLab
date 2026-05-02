@@ -940,6 +940,62 @@ def test_reset_cuda_graph_apply_graph_preserves_lazy_acceleration_buffers():
             gym_env.close()
 
 
+def test_reset_cuda_graph_explicit_env_ids_are_single_source_of_truth():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
+
+    cfg = _make_newton_cfg(_ALLEGRO_TASK, num_envs=4)
+    cfg.episode_length_s = 10.0
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_ALLEGRO_TASK, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            gym_env.reset()
+            stale_mask_env_ids = torch.tensor([0], dtype=torch.long, device=env.device)
+            explicit_env_ids = torch.tensor([2], dtype=torch.int32, device=env.device)
+            explicit_env_ids_long = explicit_env_ids.to(dtype=torch.long)
+
+            env.episode_length_buf[:] = torch.arange(env.num_envs, dtype=torch.long, device=env.device) + 10
+            env.successes[:] = torch.arange(env.num_envs, dtype=torch.float32, device=env.device) + 1.0
+            env.reset_goal_buf[:] = True
+
+            stale_state = {
+                "episode_length_buf": env.episode_length_buf[stale_mask_env_ids].clone(),
+                "successes": env.successes[stale_mask_env_ids].clone(),
+                "reset_goal_buf": env.reset_goal_buf[stale_mask_env_ids].clone(),
+            }
+
+            env.reset_buf.zero_()
+            env.reset_buf[stale_mask_env_ids] = True
+
+            assert env._reset_idx_cuda_graph(explicit_env_ids)
+            torch.cuda.synchronize()
+
+            assert int(env._reset_count_torch.item()) == 1
+            torch.testing.assert_close(env.reset_buf, torch.tensor([False, False, True, False], device=env.device))
+            torch.testing.assert_close(
+                env.episode_length_buf[explicit_env_ids_long],
+                torch.zeros_like(env.episode_length_buf[explicit_env_ids_long]),
+            )
+            torch.testing.assert_close(
+                env.successes[explicit_env_ids_long],
+                torch.zeros_like(env.successes[explicit_env_ids_long]),
+            )
+            assert not env.reset_goal_buf[explicit_env_ids_long].any()
+            torch.testing.assert_close(env.episode_length_buf[stale_mask_env_ids], stale_state["episode_length_buf"])
+            torch.testing.assert_close(env.successes[stale_mask_env_ids], stale_state["successes"])
+            torch.testing.assert_close(env.reset_goal_buf[stale_mask_env_ids], stale_state["reset_goal_buf"])
+        finally:
+            gym_env.close()
+
+
 def test_reset_cuda_graph_empty_mask_is_noop():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
