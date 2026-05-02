@@ -387,6 +387,49 @@ def test_wrench_composer_reset(device: str, num_envs: int, num_bodies: int):
         assert np.allclose(wrench_composer.out_torque_b.warp.numpy(), zeros, atol=1, rtol=1e-7)
 
 
+@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+def test_wrench_composer_graph_split_partial_reset_matches_reset(device: str):
+    mock_asset = create_mock_asset(num_envs=4, num_bodies=2, device=device)
+    composer = WrenchComposer(mock_asset)
+    forces_np = np.arange(4 * 2 * 3, dtype=np.float32).reshape(4, 2, 3) + 1.0
+    torques_np = -forces_np
+    forces = wp.from_numpy(forces_np, dtype=wp.vec3f, device=device)
+    torques = wp.from_numpy(torques_np, dtype=wp.vec3f, device=device)
+    env_mask_np = np.array([True, False, True, False], dtype=np.bool_)
+    env_mask = wp.from_numpy(env_mask_np, dtype=wp.bool, device=device)
+
+    composer.set_forces_and_torques_index(forces=forces, torques=torques)
+    before = {name: tensor.numpy().copy() for name, tensor in composer.reset_graph_tensors().items()}
+
+    composer.reset_graphable(env_mask=env_mask)
+    composer.reset_after_graph(env_mask=env_mask)
+
+    assert composer._dirty
+    for name, current_tensor in composer.reset_graph_tensors().items():
+        current = current_tensor.numpy()
+        before_array = before[name]
+        assert np.allclose(current[env_mask_np], np.zeros_like(current[env_mask_np]), atol=1e-7)
+        assert np.allclose(current[~env_mask_np], before_array[~env_mask_np], atol=1e-7)
+
+
+@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+def test_wrench_composer_graph_split_full_reset_preserves_python_flags(device: str):
+    mock_asset = create_mock_asset(num_envs=2, num_bodies=2, device=device)
+    composer = WrenchComposer(mock_asset)
+    forces_np = np.ones((2, 2, 3), dtype=np.float32)
+    forces = wp.from_numpy(forces_np, dtype=wp.vec3f, device=device)
+
+    composer.add_forces_and_torques_index(forces=forces)
+    composer.reset_graphable()
+    composer.reset_after_graph()
+
+    zeros = np.zeros((2, 2, 3), dtype=np.float32)
+    assert not composer.active
+    assert not composer._dirty
+    for tensor in composer.reset_graph_tensors().values():
+        assert np.allclose(tensor.numpy(), zeros, atol=1e-7)
+
+
 # ============================================================================
 # Global Frame Tests
 # ============================================================================

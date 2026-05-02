@@ -97,8 +97,13 @@ class Pva(BasePva):
             env_ids: Environment indices to reset. Defaults to all environments.
             env_mask: Boolean mask of environments to reset. Mutually exclusive with *env_ids*.
         """
-        env_mask = self._resolve_indices_and_mask(env_ids, env_mask)
-        super().reset(None, env_mask)
+        self.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+        self.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None):
+        """Launch graph-capturable reset work."""
+
+        env_mask = super().reset_graphable(env_ids=env_ids, env_mask=env_mask)
         wp.launch(
             pva_reset_kernel,
             dim=self._num_envs,
@@ -115,6 +120,28 @@ class Pva(BasePva):
             ],
             device=self._device,
         )
+
+    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None):
+        """Run reset work that remains outside CUDA graph replay."""
+
+    def reset_graph_tensors(self) -> dict[str, wp.array]:
+        """Return Warp arrays captured by graph-capturable reset work."""
+
+        tensors = super().reset_graph_tensors()
+        for name in (
+            "pose_w",
+            "pos_w",
+            "quat_w",
+            "projected_gravity_b",
+            "lin_vel_b",
+            "ang_vel_b",
+            "lin_acc_b",
+            "ang_acc_b",
+        ):
+            tensor = getattr(self._data, f"_{name}")
+            if tensor is not None:
+                tensors[name] = tensor
+        return tensors
 
     """
     Implementation

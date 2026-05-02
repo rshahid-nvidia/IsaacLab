@@ -189,6 +189,67 @@ def test_reset(sim):
     torch.testing.assert_close(quat, expected_quat)
 
 
+def test_reset_graph_split_resets_super_and_pva_buffers(sim):
+    """Graphable reset should match PVA reset semantics for base sensor timestamps and PVA buffers."""
+    scene_cfg = PvaTestSceneCfg(num_envs=3)
+    scene = InteractiveScene(scene_cfg)
+    sim.reset()
+
+    pva: Pva = scene["pva"]
+    env_mask_torch = torch.tensor([True, False, True], dtype=torch.bool, device=sim.device)
+    env_mask_wp = wp.from_torch(env_mask_torch, dtype=wp.bool)
+
+    tensors = {name: wp.to_torch(tensor) for name, tensor in pva.reset_graph_tensors().items()}
+    for name, tensor in tensors.items():
+        if tensor.dtype == torch.bool:
+            tensor[:] = False
+        else:
+            tensor[:] = torch.arange(tensor.numel(), dtype=tensor.dtype, device=tensor.device).reshape(tensor.shape) + 1
+
+    kept = {name: tensor[~env_mask_torch].clone() for name, tensor in tensors.items()}
+
+    pva.reset_graphable(env_mask=env_mask_wp)
+    pva.reset_after_graph(env_mask=env_mask_wp)
+    if "cuda" in sim.device:
+        torch.cuda.synchronize()
+
+    zero_expected = {
+        "timestamp",
+        "timestamp_last_update",
+        "pos_w",
+        "lin_vel_b",
+        "ang_vel_b",
+        "lin_acc_b",
+        "ang_acc_b",
+    }
+    for name in zero_expected:
+        torch.testing.assert_close(tensors[name][env_mask_torch], torch.zeros_like(tensors[name][env_mask_torch]))
+
+    expected_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=tensors["quat_w"].dtype, device=tensors["quat_w"].device)
+    expected_pose = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=tensors["pose_w"].dtype, device=tensors["pose_w"].device)
+    expected_projected_gravity = torch.tensor(
+        [0.0, 0.0, -1.0],
+        dtype=tensors["projected_gravity_b"].dtype,
+        device=tensors["projected_gravity_b"].device,
+    )
+    torch.testing.assert_close(
+        tensors["pose_w"][env_mask_torch],
+        expected_pose.repeat(int(env_mask_torch.sum().item()), 1),
+    )
+    torch.testing.assert_close(
+        tensors["quat_w"][env_mask_torch],
+        expected_quat.repeat(int(env_mask_torch.sum().item()), 1),
+    )
+    torch.testing.assert_close(
+        tensors["projected_gravity_b"][env_mask_torch],
+        expected_projected_gravity.repeat(int(env_mask_torch.sum().item()), 1),
+    )
+    assert tensors["is_outdated"][env_mask_torch].all()
+
+    for name, tensor in tensors.items():
+        torch.testing.assert_close(tensor[~env_mask_torch], kept[name])
+
+
 @configclass
 class FreefallSceneCfg(InteractiveSceneCfg):
     """Scene with a rigid cube and PVA but no ground plane (freefall)."""

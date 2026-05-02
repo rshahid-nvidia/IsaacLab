@@ -126,12 +126,32 @@ class RigidObject(BaseRigidObject):
             env_ids: Environment indices. If None, then all indices are used.
             env_mask: Environment mask. If None, then all the instances are updated. Shape is (num_instances,).
         """
-        # resolve all indices
-        if (env_ids is None) or (env_ids == slice(None)):
-            env_ids = slice(None)
-        # reset external wrench
-        self._instantaneous_wrench_composer.reset(env_ids, env_mask)
-        self._permanent_wrench_composer.reset(env_ids, env_mask)
+        self.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+        self.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Launch graph-capturable reset work."""
+
+        self._instantaneous_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+        self._permanent_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Commit Python-side reset state after graph replay."""
+
+        self._instantaneous_wrench_composer.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        self._permanent_wrench_composer.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graph_tensors(self) -> dict[str, wp.array]:
+        """Return Warp arrays captured by graph-capturable reset work."""
+
+        tensors: dict[str, wp.array] = {}
+        for composer_name, composer in (
+            ("instantaneous_wrench_composer", self._instantaneous_wrench_composer),
+            ("permanent_wrench_composer", self._permanent_wrench_composer),
+        ):
+            for name, tensor in composer.reset_graph_tensors().items():
+                tensors[f"{composer_name}.{name}"] = tensor
+        return tensors
 
     def write_data_to_sim(self) -> None:
         """Write external wrench to the simulation.
@@ -192,6 +212,33 @@ class RigidObject(BaseRigidObject):
     """
     Operations - Write to simulation.
     """
+
+    def _mark_root_link_pose_buffers_dirty(self) -> None:
+        """Invalidate Python-side caches affected by a root link pose write."""
+
+        if self.data._root_link_state_w is not None:
+            self.data._root_link_state_w.timestamp = -1.0
+        if self.data._root_state_w is not None:
+            self.data._root_state_w.timestamp = -1.0
+
+    def _mark_root_com_velocity_buffers_dirty(self) -> None:
+        """Invalidate Python-side caches affected by a root COM velocity write."""
+
+        if self.data._root_state_w is not None:
+            self.data._root_state_w.timestamp = -1.0
+        if self.data._root_com_state_w is not None:
+            self.data._root_com_state_w.timestamp = -1.0
+        self.data._body_com_acc_w.timestamp = self.data._sim_timestamp
+
+    def write_root_pose_to_sim_mask_after_graph(self) -> None:
+        """Apply Python-side state updates after graph replay of ``write_root_pose_to_sim_mask``."""
+
+        self._mark_root_link_pose_buffers_dirty()
+
+    def write_root_velocity_to_sim_mask_after_graph(self) -> None:
+        """Apply Python-side state updates after graph replay of ``write_root_velocity_to_sim_mask``."""
+
+        self._mark_root_com_velocity_buffers_dirty()
 
     def write_root_pose_to_sim_index(
         self,
@@ -329,11 +376,7 @@ class RigidObject(BaseRigidObject):
             ],
             device=self.device,
         )
-        # Need to invalidate the buffer to trigger the update with the new state.
-        if self.data._root_link_state_w is not None:
-            self.data._root_link_state_w.timestamp = -1.0
-        if self.data._root_state_w is not None:
-            self.data._root_state_w.timestamp = -1.0
+        self._mark_root_link_pose_buffers_dirty()
         SimulationManager.invalidate_fk(env_ids=env_ids, articulation_ids=self._root_view.articulation_ids)
 
     def write_root_link_pose_to_sim_mask(
@@ -377,11 +420,7 @@ class RigidObject(BaseRigidObject):
             ],
             device=self.device,
         )
-        # Need to invalidate the buffer to trigger the update with the new state.
-        if self.data._root_link_state_w is not None:
-            self.data._root_link_state_w.timestamp = -1.0
-        if self.data._root_state_w is not None:
-            self.data._root_state_w.timestamp = -1.0
+        self._mark_root_link_pose_buffers_dirty()
         SimulationManager.invalidate_fk(env_mask=env_mask, articulation_ids=self._root_view.articulation_ids)
 
     def write_root_com_pose_to_sim_index(
@@ -538,10 +577,7 @@ class RigidObject(BaseRigidObject):
             ],
             device=self.device,
         )
-        if self.data._root_state_w is not None:
-            self.data._root_state_w.timestamp = -1.0
-        if self.data._root_com_state_w is not None:
-            self.data._root_com_state_w.timestamp = -1.0
+        self._mark_root_com_velocity_buffers_dirty()
         SimulationManager.invalidate_fk(env_ids=env_ids, articulation_ids=self._root_view.articulation_ids)
 
     def write_root_com_velocity_to_sim_mask(
@@ -589,10 +625,7 @@ class RigidObject(BaseRigidObject):
             ],
             device=self.device,
         )
-        if self.data._root_state_w is not None:
-            self.data._root_state_w.timestamp = -1.0
-        if self.data._root_com_state_w is not None:
-            self.data._root_com_state_w.timestamp = -1.0
+        self._mark_root_com_velocity_buffers_dirty()
         SimulationManager.invalidate_fk(env_mask=env_mask, articulation_ids=self._root_view.articulation_ids)
 
     def write_root_link_velocity_to_sim_index(

@@ -175,6 +175,46 @@ class SensorBase(ABC):
             env_mask: A boolean warp array indicating which environments to reset. If provided,
                 takes priority over ``env_ids``. Defaults to None.
         """
+        self._reset_base_buffers(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> wp.array:
+        """Launch graph-capturable reset work for base sensor buffers.
+
+        Passing a stable ``env_mask`` is the graph-capturable path. The ``env_ids`` path is retained for semantic
+        compatibility with :meth:`reset`, but it materializes a mask through Torch indexing and should not be used
+        during CUDA graph capture.
+
+        Returns:
+            The resolved environment mask used by the base reset kernel.
+        """
+
+        return self._reset_base_buffers(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Run reset work that remains outside CUDA graph replay.
+
+        The base sensor reset is graphable. Sensors with additional reset behavior that is not graph-capturable should
+        keep using their existing full :meth:`reset` implementation here or override this method with only the residual
+        Python-side work.
+        """
+
+        self.reset(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graph_tensors(self) -> dict[str, wp.array]:
+        """Return Warp arrays whose storage is captured by :meth:`reset_graphable`."""
+
+        tensors: dict[str, wp.array] = {}
+        for name in ("is_outdated", "timestamp", "timestamp_last_update"):
+            tensor = getattr(self, f"_{name}", None)
+            if tensor is not None:
+                tensors[name] = tensor
+        return tensors
+
+    def _reset_base_buffers(
+        self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None
+    ) -> wp.array:
+        """Reset base timestamp/outdated buffers and return the resolved environment mask."""
+
         env_mask = self._resolve_indices_and_mask(env_ids, env_mask)
         wp.launch(
             reset_envs_kernel,
@@ -182,6 +222,7 @@ class SensorBase(ABC):
             inputs=[env_mask, self._is_outdated, self._timestamp, self._timestamp_last_update],
             device=self._device,
         )
+        return env_mask
 
     def update(self, dt: float, force_recompute: bool = False):
         # Skip update if sensor is not initialized

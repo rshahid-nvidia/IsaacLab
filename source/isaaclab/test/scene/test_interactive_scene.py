@@ -17,15 +17,94 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import warp as wp
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
+from isaaclab.assets.asset_base import AssetBase
 from isaaclab.physics.scene_data_requirements import SceneDataRequirement
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+from isaaclab.sensors.sensor_base import SensorBase
 from isaaclab.sim import build_simulation_context
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+
+
+class _FallbackResetEntity:
+    def __init__(self, log):
+        self.log = log
+
+    def reset(self, env_ids=None):
+        self.log.append(("fallback.reset", env_ids))
+
+    def reset_graphable(self, env_ids=None, env_mask=None):
+        pass
+
+    def reset_after_graph(self, env_ids=None, env_mask=None):
+        self.reset(env_ids)
+
+    def reset_graph_tensors(self):
+        return {}
+
+
+class _GraphAwareResetEntity:
+    def __init__(self, log):
+        self.log = log
+        self.tensor = torch.zeros(1)
+
+    def reset(self, env_ids=None, env_mask=None):
+        self.log.append(("graph.full_reset", env_ids, env_mask))
+
+    def reset_graphable(self, env_ids=None, env_mask=None):
+        self.log.append(("graph.graphable", env_ids, env_mask))
+
+    def reset_after_graph(self, env_ids=None, env_mask=None):
+        self.log.append(("graph.after_graph", env_ids, env_mask))
+
+    def reset_graph_tensors(self):
+        return {"tensor": self.tensor}
+
+
+class _DefaultGraphAsset(AssetBase):
+    def __init__(self):
+        self.log = []
+        self._initialize_handle = None
+        self._invalidate_initialize_handle = None
+        self._prim_deletion_handle = None
+        self._debug_vis_handle = None
+
+    @property
+    def num_instances(self):
+        return 0
+
+    @property
+    def data(self):
+        return None
+
+    def reset(self, env_ids=None):
+        self.log.append(("reset", env_ids))
+
+    def write_data_to_sim(self):
+        pass
+
+    def update(self, dt):
+        pass
+
+    def _initialize_impl(self):
+        pass
+
+
+class _DefaultGraphSensor(SensorBase):
+    @property
+    def data(self):
+        return None
+
+    def _initialize_impl(self):
+        pass
+
+    def _update_buffers_impl(self, env_mask):
+        pass
 
 
 @configclass
@@ -227,6 +306,137 @@ def test_refresh_visualizer_clone_fn_uses_registered_requirements(monkeypatch: p
 
     assert captured["requirements"].requires_newton_model
     assert scene.cloner_cfg.visualizer_clone_fn == "visualizer-clone-fn"
+
+
+def test_scene_reset_composes_graphable_and_fallback_entities():
+    log = []
+    env_ids = torch.tensor([0, 2], dtype=torch.int32)
+    fallback = _FallbackResetEntity(log)
+    graph_aware = _GraphAwareResetEntity(log)
+    scene = object.__new__(InteractiveScene)
+    scene._articulations = {"fallback": fallback}
+    scene._deformable_objects = {}
+    scene._rigid_objects = {"graph": graph_aware}
+    scene._surface_grippers = {}
+    scene._rigid_object_collections = {}
+    scene._sensors = {}
+
+    scene.reset(env_ids=env_ids)
+
+    assert [entry[0] for entry in log] == ["fallback.reset", "graph.full_reset"]
+    assert log[0][1] is env_ids
+    assert log[1][1] is env_ids
+
+
+def test_scene_reset_with_env_mask_composes_each_entity_split_in_order():
+    log = []
+    env_ids = torch.tensor([0, 2], dtype=torch.int32)
+    env_mask = object()
+    fallback = _FallbackResetEntity(log)
+    graph_aware = _GraphAwareResetEntity(log)
+    scene = object.__new__(InteractiveScene)
+    scene._articulations = {"fallback": fallback}
+    scene._deformable_objects = {}
+    scene._rigid_objects = {"graph": graph_aware}
+    scene._surface_grippers = {}
+    scene._rigid_object_collections = {}
+    scene._sensors = {}
+
+    scene.reset(env_ids=env_ids, env_mask=env_mask)
+
+    assert [entry[0] for entry in log] == [
+        "fallback.reset",
+        "graph.graphable",
+        "graph.after_graph",
+    ]
+    assert log[0][1] is env_ids
+    assert log[1][1] is env_ids and log[1][2] is env_mask
+    assert log[2][1] is env_ids and log[2][2] is env_mask
+
+
+def test_scene_reset_graphable_only_skips_unsupported_entities():
+    log = []
+    env_ids = torch.tensor([1], dtype=torch.int32)
+    env_mask = object()
+    fallback = _FallbackResetEntity(log)
+    graph_aware = _GraphAwareResetEntity(log)
+    scene = object.__new__(InteractiveScene)
+    scene._articulations = {"fallback": fallback}
+    scene._deformable_objects = {}
+    scene._rigid_objects = {"graph": graph_aware}
+    scene._surface_grippers = {}
+    scene._rigid_object_collections = {}
+    scene._sensors = {}
+
+    scene.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+
+    assert [entry[0] for entry in log] == ["graph.graphable"]
+    assert log[0][1] is env_ids and log[0][2] is env_mask
+
+
+def test_scene_graph_capture_split_batches_graphable_before_residual():
+    log = []
+    env_ids = torch.tensor([0], dtype=torch.int32)
+    env_mask = object()
+    fallback = _FallbackResetEntity(log)
+    graph_aware = _GraphAwareResetEntity(log)
+    scene = object.__new__(InteractiveScene)
+    scene._articulations = {"fallback": fallback}
+    scene._deformable_objects = {}
+    scene._rigid_objects = {"graph": graph_aware}
+    scene._surface_grippers = {}
+    scene._rigid_object_collections = {}
+    scene._sensors = {}
+
+    scene.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+    scene.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    assert [entry[0] for entry in log] == ["graph.graphable", "fallback.reset", "graph.after_graph"]
+    assert log[0][1] is env_ids and log[0][2] is env_mask
+    assert log[1][1] is env_ids
+    assert log[2][1] is env_ids and log[2][2] is env_mask
+
+
+def test_scene_reset_graph_tensors_prefixes_entity_names():
+    log = []
+    graph_aware = _GraphAwareResetEntity(log)
+    scene = object.__new__(InteractiveScene)
+    scene._articulations = {}
+    scene._deformable_objects = {}
+    scene._rigid_objects = {"cube": graph_aware}
+    scene._surface_grippers = {}
+    scene._rigid_object_collections = {}
+    scene._sensors = {}
+
+    assert scene.reset_graph_tensors() == {"rigid_object.cube.tensor": graph_aware.tensor}
+
+
+def test_sensor_base_reset_graph_tensors_reports_base_timestamp_buffers():
+    sensor = object.__new__(_DefaultGraphSensor)
+    sensor._initialize_handle = None
+    sensor._invalidate_initialize_handle = None
+    sensor._prim_deletion_handle = None
+    sensor._debug_vis_handle = None
+    sensor._is_outdated = wp.zeros(3, dtype=wp.bool, device="cpu")
+    sensor._timestamp = wp.zeros(3, dtype=wp.float32, device="cpu")
+    sensor._timestamp_last_update = wp.zeros(3, dtype=wp.float32, device="cpu")
+
+    assert sensor.reset_graph_tensors() == {
+        "is_outdated": sensor._is_outdated,
+        "timestamp": sensor._timestamp,
+        "timestamp_last_update": sensor._timestamp_last_update,
+    }
+
+
+def test_asset_default_graph_fallback_requires_env_ids_for_mask_reset():
+    asset = _DefaultGraphAsset()
+    env_ids = torch.tensor([0, 2], dtype=torch.int32)
+
+    asset.reset_after_graph(env_ids=env_ids, env_mask=object())
+    assert asset.log == [("reset", env_ids)]
+
+    with pytest.raises(ValueError, match="mask-native graph reset fallback"):
+        asset.reset_after_graph(env_mask=object())
 
 
 def assert_state_equal(s1: dict, s2: dict, path=""):

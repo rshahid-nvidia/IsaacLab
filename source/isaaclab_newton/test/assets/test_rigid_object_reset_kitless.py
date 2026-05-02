@@ -74,3 +74,40 @@ def test_reset_rigid_object_wrench_buffers_with_env_mask_kitless(device):
             )
             torch.testing.assert_close(out_force[~env_mask_torch], forces[~env_mask_torch])
             torch.testing.assert_close(out_torque[~env_mask_torch], torques[~env_mask_torch])
+
+
+@pytest.mark.isaacsim_ci
+@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+def test_reset_rigid_object_graph_split_matches_reset_kitless(device):
+    """Graphable reset plus after-graph commit should match env_mask reset semantics."""
+    with _newton_sim_context(device) as sim:
+        cube_object = _generate_cubes_scene(num_cubes=4, device=device)
+        sim.reset()
+
+        body_ids, _ = cube_object.find_bodies(".*")
+        forces = torch.arange(cube_object.num_instances * len(body_ids) * 3, dtype=torch.float32, device=sim.device)
+        forces = forces.reshape(cube_object.num_instances, len(body_ids), 3) + 1.0
+        torques = -forces
+        env_mask_torch = torch.tensor([False, True, False, True], device=sim.device)
+        env_mask_wp = wp.from_torch(env_mask_torch, dtype=wp.bool)
+
+        for composer in (cube_object.instantaneous_wrench_composer, cube_object.permanent_wrench_composer):
+            composer.set_forces_and_torques_index(forces=forces, torques=torques, body_ids=body_ids)
+
+        before = {
+            composer: {name: tensor.numpy().copy() for name, tensor in composer.reset_graph_tensors().items()}
+            for composer in (cube_object.instantaneous_wrench_composer, cube_object.permanent_wrench_composer)
+        }
+
+        cube_object.reset_graphable(env_mask=env_mask_wp)
+        for composer in before:
+            composer._dirty = False
+        cube_object.reset_after_graph(env_mask=env_mask_wp)
+
+        for composer, snapshot in before.items():
+            assert composer._dirty
+            for name, current_tensor in composer.reset_graph_tensors().items():
+                current = torch.as_tensor(current_tensor.numpy(), device=sim.device)
+                original = torch.as_tensor(snapshot[name], device=sim.device)
+                torch.testing.assert_close(current[env_mask_torch], torch.zeros_like(current[env_mask_torch]))
+                torch.testing.assert_close(current[~env_mask_torch], original[~env_mask_torch])

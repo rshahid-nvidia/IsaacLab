@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import torch
+import warp as wp
 
 from isaaclab.envs.cuda_graph import CudaGraphReplayGuard
 
@@ -44,3 +45,17 @@ def test_cuda_graph_replay_guard_detects_missing_and_unexpected_keys():
     assert guard.check(tensors={"tensor": tensor, "extra": tensor}, values={"scale": 1.0}) == "extra was not captured"
     assert guard.check(tensors={"tensor": tensor}, values={}) == "scale missing"
     assert guard.check(tensors={"tensor": tensor}, values={"scale": 1.0, "extra": 2.0}) == "extra was not captured"
+
+
+def test_cuda_graph_replay_guard_accepts_unchanged_warp_arrays():
+    array = wp.zeros((4, 3), dtype=wp.float32, device="cpu")
+    guard = CudaGraphReplayGuard(tensors={"array": array})
+
+    assert guard.check(tensors={"array": array}) is None
+
+
+def test_cuda_graph_replay_guard_detects_warp_array_storage_change():
+    array = wp.zeros((4, 3), dtype=wp.float32, device="cpu")
+    guard = CudaGraphReplayGuard(tensors={"array": array})
+
+    assert guard.check(tensors={"array": wp.zeros((4, 3), dtype=wp.float32, device="cpu")}) == "array storage changed"

@@ -613,6 +613,45 @@ class WrenchComposer:
             )
             self._dirty = True
 
+    def reset_graphable(
+        self,
+        env_ids: wp.array | torch.Tensor | Sequence[int] | slice | None = None,
+        env_mask: wp.array | None = None,
+    ) -> None:
+        """Launch the graph-capturable tensor work for :meth:`reset`.
+
+        ``reset`` remains the full semantic reset. Graph-aware owners call this method inside CUDA graph capture/replay
+        and call :meth:`reset_after_graph` afterwards to restore Python-side flags that replay does not execute.
+        """
+
+        self.reset(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_after_graph(
+        self,
+        env_ids: wp.array | torch.Tensor | Sequence[int] | slice | None = None,
+        env_mask: wp.array | None = None,
+    ) -> None:
+        """Commit Python-side reset state after a captured reset replay."""
+
+        if env_ids is None and env_mask is None:
+            self._active = False
+            self._dirty = False
+        else:
+            self._dirty = True
+
+    def reset_graph_tensors(self) -> dict[str, wp.array]:
+        """Return Warp arrays whose storage is captured by :meth:`reset_graphable`."""
+
+        return {
+            "global_force_w": self._global_force_w,
+            "global_torque_w": self._global_torque_w,
+            "global_force_at_com_w": self._global_force_at_com_w,
+            "local_force_b": self._local_force_b,
+            "local_torque_b": self._local_torque_b,
+            "out_force_b": self._out_force_b,
+            "out_torque_b": self._out_torque_b,
+        }
+
     # ------------------------------------------------------------------
     # Deprecated methods
     # ------------------------------------------------------------------

@@ -169,14 +169,48 @@ class RigidObjectCollection(BaseRigidObjectCollection):
             env_mask: Environment mask. If None, then all the instances are updated. Shape is (num_instances,).
             object_mask: Object mask. Not used currently.
         """
-        # resolve all indices
+        self.reset_graphable(env_ids=env_ids, object_ids=object_ids, env_mask=env_mask, object_mask=object_mask)
+        self.reset_after_graph(env_ids=env_ids, object_ids=object_ids, env_mask=env_mask, object_mask=object_mask)
+
+    def reset_graphable(
+        self,
+        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
+        object_ids: slice | torch.Tensor | None = None,
+        env_mask: wp.array | None = None,
+        object_mask: wp.array | None = None,
+    ) -> None:
+        """Launch graph-capturable reset work."""
+
         if env_ids is None:
             env_ids = self._ALL_ENV_INDICES
-        if object_ids is None:
-            object_ids = self._ALL_BODY_INDICES
-        # reset external wrench
-        self._instantaneous_wrench_composer.reset(env_ids)
-        self._permanent_wrench_composer.reset(env_ids)
+        self._instantaneous_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+        self._permanent_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_after_graph(
+        self,
+        env_ids: Sequence[int] | torch.Tensor | wp.array | None = None,
+        object_ids: slice | torch.Tensor | None = None,
+        env_mask: wp.array | None = None,
+        object_mask: wp.array | None = None,
+    ) -> None:
+        """Commit Python-side reset state after graph replay."""
+
+        if env_ids is None and env_mask is None:
+            env_ids = self._ALL_ENV_INDICES
+        self._instantaneous_wrench_composer.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        self._permanent_wrench_composer.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graph_tensors(self) -> dict[str, wp.array]:
+        """Return Warp arrays captured by graph-capturable reset work."""
+
+        tensors: dict[str, wp.array] = {}
+        for composer_name, composer in (
+            ("instantaneous_wrench_composer", self._instantaneous_wrench_composer),
+            ("permanent_wrench_composer", self._permanent_wrench_composer),
+        ):
+            for name, tensor in composer.reset_graph_tensors().items():
+                tensors[f"{composer_name}.{name}"] = tensor
+        return tensors
 
     def write_data_to_sim(self) -> None:
         """Write external wrench to the simulation.

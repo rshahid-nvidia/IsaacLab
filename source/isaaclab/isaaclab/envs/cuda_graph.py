@@ -67,6 +67,51 @@ class CudaGraphTensorSignature:
         return None
 
 
+@dataclass(frozen=True)
+class CudaGraphWarpArraySignature:
+    """Warp array properties that a captured CUDA graph depends on."""
+
+    data_ptr: int
+    shape: tuple[int, ...]
+    strides: tuple[int, ...]
+    dtype: str
+    device: str
+
+    @classmethod
+    def capture(cls, array: wp.array) -> "CudaGraphWarpArraySignature":
+        """Capture the replay-relevant identity and metadata of ``array``."""
+
+        return cls(
+            data_ptr=int(array.ptr),
+            shape=tuple(array.shape),
+            strides=tuple(array.strides),
+            dtype=str(array.dtype),
+            device=str(array.device),
+        )
+
+    def check(self, array: wp.array) -> str | None:
+        """Return a short mismatch reason, or ``None`` if ``array`` still matches."""
+
+        current = type(self).capture(array)
+        if current.data_ptr != self.data_ptr:
+            return "storage changed"
+        if current != self:
+            return "metadata changed"
+        return None
+
+
+CudaGraphCaptureTarget = torch.Tensor | wp.array
+CudaGraphCaptureSignature = CudaGraphTensorSignature | CudaGraphWarpArraySignature
+
+
+def _capture_graph_target(target: CudaGraphCaptureTarget) -> CudaGraphCaptureSignature:
+    if isinstance(target, torch.Tensor):
+        return CudaGraphTensorSignature.capture(target)
+    if isinstance(target, wp.array):
+        return CudaGraphWarpArraySignature.capture(target)
+    raise TypeError(f"Unsupported CUDA graph replay target type: {type(target).__name__}")
+
+
 class CudaGraphReplayGuard:
     """Validate that replay-time tensors and constants still match capture-time assumptions.
 
@@ -74,13 +119,13 @@ class CudaGraphReplayGuard:
     while this helper gives every task the same conservative checking semantics and error strings.
     """
 
-    def __init__(self, *, tensors: Mapping[str, torch.Tensor], values: Mapping[str, Any] | None = None):
-        self._tensor_signatures = {
-            name: CudaGraphTensorSignature.capture(tensor) for name, tensor in tensors.items()
-        }
+    def __init__(self, *, tensors: Mapping[str, CudaGraphCaptureTarget], values: Mapping[str, Any] | None = None):
+        self._tensor_signatures = {name: _capture_graph_target(tensor) for name, tensor in tensors.items()}
         self._values = dict(values or {})
 
-    def check(self, *, tensors: Mapping[str, torch.Tensor], values: Mapping[str, Any] | None = None) -> str | None:
+    def check(
+        self, *, tensors: Mapping[str, CudaGraphCaptureTarget], values: Mapping[str, Any] | None = None
+    ) -> str | None:
         """Return the first violated replay assumption, or ``None`` if replay is safe."""
 
         values = values or {}

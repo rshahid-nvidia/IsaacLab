@@ -455,27 +455,122 @@ class InteractiveScene:
     Operations.
     """
 
-    def reset(self, env_ids: Sequence[int] | None = None):
+    def reset(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None):
         """Resets the scene entities.
 
         Args:
             env_ids: The indices of the environments to reset.
                 Defaults to None (all instances).
+            env_mask: A boolean Warp array indicating which environments to reset. If provided, graph-aware entities use
+                it for mask-native reset work. Defaults to None.
         """
+
+        if env_mask is None:
+            # -- assets
+            for articulation in self._articulations.values():
+                articulation.reset(env_ids)
+            for deformable_object in self._deformable_objects.values():
+                deformable_object.reset(env_ids)
+            for rigid_object in self._rigid_objects.values():
+                rigid_object.reset(env_ids)
+            for surface_gripper in self._surface_grippers.values():
+                surface_gripper.reset(env_ids)
+            for rigid_object_collection in self._rigid_object_collections.values():
+                rigid_object_collection.reset(env_ids)
+            # -- sensors
+            for sensor in self._sensors.values():
+                sensor.reset(env_ids)
+        else:
+            # -- assets
+            for articulation in self._articulations.values():
+                articulation.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+                articulation.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            for deformable_object in self._deformable_objects.values():
+                deformable_object.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+                deformable_object.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            for rigid_object in self._rigid_objects.values():
+                rigid_object.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+                rigid_object.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            for surface_gripper in self._surface_grippers.values():
+                surface_gripper.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+                surface_gripper.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            for rigid_object_collection in self._rigid_object_collections.values():
+                rigid_object_collection.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+                rigid_object_collection.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            # -- sensors
+            for sensor in self._sensors.values():
+                sensor.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+                sensor.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Launch graph-capturable scene reset work for entities that support it.
+
+        This method is the CUDA graph capture/replay phase, so it batches graphable work for all entities before
+        :meth:`reset_after_graph` runs. Entity implementations must keep graphable reset work independent of any
+        residual Python work in their own or another entity's :meth:`reset_after_graph`.
+        """
+
         # -- assets
         for articulation in self._articulations.values():
-            articulation.reset(env_ids)
+            articulation.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         for deformable_object in self._deformable_objects.values():
-            deformable_object.reset(env_ids)
+            deformable_object.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         for rigid_object in self._rigid_objects.values():
-            rigid_object.reset(env_ids)
+            rigid_object.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         for surface_gripper in self._surface_grippers.values():
-            surface_gripper.reset(env_ids)
+            surface_gripper.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         for rigid_object_collection in self._rigid_object_collections.values():
-            rigid_object_collection.reset(env_ids)
+            rigid_object_collection.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         # -- sensors
         for sensor in self._sensors.values():
-            sensor.reset(env_ids)
+            sensor.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Run scene reset work that remains outside CUDA graph replay.
+
+        This is the residual phase paired with :meth:`reset_graphable`. It intentionally runs after all graphable scene
+        work has replayed, unlike :meth:`reset(env_mask=...)`, which composes graphable and residual work per entity to
+        preserve full-reset semantics outside graph capture.
+        """
+
+        # -- assets
+        for articulation in self._articulations.values():
+            articulation.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        for deformable_object in self._deformable_objects.values():
+            deformable_object.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        for rigid_object in self._rigid_objects.values():
+            rigid_object.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        for surface_gripper in self._surface_grippers.values():
+            surface_gripper.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        for rigid_object_collection in self._rigid_object_collections.values():
+            rigid_object_collection.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        # -- sensors
+        for sensor in self._sensors.values():
+            sensor.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
+        """Return tensors and Warp arrays captured by graph-aware scene reset work."""
+
+        tensors: dict[str, torch.Tensor | wp.array] = {}
+        for name, articulation in self._articulations.items():
+            for tensor_name, tensor in articulation.reset_graph_tensors().items():
+                tensors[f"articulation.{name}.{tensor_name}"] = tensor
+        for name, deformable_object in self._deformable_objects.items():
+            for tensor_name, tensor in deformable_object.reset_graph_tensors().items():
+                tensors[f"deformable_object.{name}.{tensor_name}"] = tensor
+        for name, rigid_object in self._rigid_objects.items():
+            for tensor_name, tensor in rigid_object.reset_graph_tensors().items():
+                tensors[f"rigid_object.{name}.{tensor_name}"] = tensor
+        for name, surface_gripper in self._surface_grippers.items():
+            for tensor_name, tensor in surface_gripper.reset_graph_tensors().items():
+                tensors[f"surface_gripper.{name}.{tensor_name}"] = tensor
+        for name, rigid_object_collection in self._rigid_object_collections.items():
+            for tensor_name, tensor in rigid_object_collection.reset_graph_tensors().items():
+                tensors[f"rigid_object_collection.{name}.{tensor_name}"] = tensor
+        for name, sensor in self._sensors.items():
+            for tensor_name, tensor in sensor.reset_graph_tensors().items():
+                tensors[f"sensor.{name}.{tensor_name}"] = tensor
+        return tensors
 
     def write_data_to_sim(self):
         """Writes the data of the scene entities to the simulation."""

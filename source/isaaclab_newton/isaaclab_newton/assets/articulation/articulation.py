@@ -233,15 +233,50 @@ class Articulation(BaseArticulation):
             env_ids: Environment indices. If None, then all indices are used.
             env_mask: Environment mask. If None, then all the instances are updated. Shape is (num_instances,).
         """
-        # use ellipses object to skip initial indices.
-        if (env_ids is None) or (env_ids == slice(None)):
-            env_ids = slice(None)
-        # reset actuators
+        self._reset_actuators(env_ids)
+        self.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+        self._reset_wrench_composer_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Launch graph-capturable reset work."""
+
+        self._instantaneous_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+        self._permanent_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Run reset work that remains outside CUDA graph replay."""
+
+        self._reset_actuators(env_ids)
+        self._reset_wrench_composer_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def _reset_actuators(self, env_ids: Sequence[int] | None = None) -> None:
+        """Reset actuator state using the same env-id convention as the original reset path."""
+
+        reset_env_ids = env_ids
+        if (reset_env_ids is None) or (reset_env_ids == slice(None)):
+            reset_env_ids = slice(None)
         for actuator in self.actuators.values():
-            actuator.reset(env_ids)
-        # reset external wrenches.
-        self._instantaneous_wrench_composer.reset(env_ids, env_mask)
-        self._permanent_wrench_composer.reset(env_ids, env_mask)
+            actuator.reset(reset_env_ids)
+
+    def _reset_wrench_composer_after_graph(
+        self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None
+    ) -> None:
+        """Commit external-wrench Python flags that graph replay cannot update."""
+
+        self._instantaneous_wrench_composer.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        self._permanent_wrench_composer.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graph_tensors(self) -> dict[str, wp.array]:
+        """Return Warp arrays captured by graph-capturable reset work."""
+
+        tensors: dict[str, wp.array] = {}
+        for composer_name, composer in (
+            ("instantaneous_wrench_composer", self._instantaneous_wrench_composer),
+            ("permanent_wrench_composer", self._permanent_wrench_composer),
+        ):
+            for name, tensor in composer.reset_graph_tensors().items():
+                tensors[f"{composer_name}.{name}"] = tensor
+        return tensors
 
     def write_data_to_sim(self):
         """Write external wrenches and joint commands to the simulation.
@@ -383,6 +418,77 @@ class Articulation(BaseArticulation):
     Operations - State Writers.
     """
 
+    def _mark_root_link_pose_buffers_dirty(self) -> None:
+        """Invalidate Python-side caches affected by a root link pose write."""
+
+        if self.data._root_link_state_w is not None:
+            self.data._root_link_state_w.timestamp = -1.0
+        if self.data._root_state_w is not None:
+            self.data._root_state_w.timestamp = -1.0
+        self.data._fk_timestamp = -1.0  # Forces a kinematic update to get the latest body link poses.
+        if self.data._body_com_pose_w is not None:
+            self.data._body_com_pose_w.timestamp = -1.0
+        if self.data._body_state_w is not None:
+            self.data._body_state_w.timestamp = -1.0
+        if self.data._body_link_state_w is not None:
+            self.data._body_link_state_w.timestamp = -1.0
+        if self.data._body_com_state_w is not None:
+            self.data._body_com_state_w.timestamp = -1.0
+
+    def _mark_root_com_velocity_buffers_dirty(self) -> None:
+        """Invalidate Python-side caches affected by a root COM velocity write."""
+
+        if self.data._root_state_w is not None:
+            self.data._root_state_w.timestamp = -1.0
+        if self.data._root_com_state_w is not None:
+            self.data._root_com_state_w.timestamp = -1.0
+        self.data._body_com_acc_w.timestamp = self.data._sim_timestamp
+
+    def _mark_joint_position_buffers_dirty(self) -> None:
+        """Invalidate Python-side caches affected by a joint position write."""
+
+        self.data._fk_timestamp = -1.0
+        if self.data._body_link_vel_w is not None:
+            self.data._body_link_vel_w.timestamp = -1.0
+        if self.data._body_com_pose_b is not None:
+            self.data._body_com_pose_b.timestamp = -1.0
+        if self.data._body_com_pose_w is not None:
+            self.data._body_com_pose_w.timestamp = -1.0
+        if self.data._body_state_w is not None:
+            self.data._body_state_w.timestamp = -1.0
+        if self.data._body_link_state_w is not None:
+            self.data._body_link_state_w.timestamp = -1.0
+        if self.data._body_com_state_w is not None:
+            self.data._body_com_state_w.timestamp = -1.0
+
+    def _mark_joint_velocity_buffers_written(self) -> None:
+        """Mark joint acceleration consistent with a joint velocity write."""
+
+        self.data._joint_acc.timestamp = self.data._sim_timestamp
+
+    def write_root_pose_to_sim_mask_after_graph(self) -> None:
+        """Apply Python-side state updates after graph replay of ``write_root_pose_to_sim_mask``."""
+
+        self._mark_root_link_pose_buffers_dirty()
+
+    def write_root_velocity_to_sim_mask_after_graph(self) -> None:
+        """Apply Python-side state updates after graph replay of ``write_root_velocity_to_sim_mask``."""
+
+        self._mark_root_com_velocity_buffers_dirty()
+
+    def set_joint_position_target_mask_after_graph(self) -> None:
+        """Apply Python-side state updates after graph replay of ``set_joint_position_target_mask``."""
+
+    def write_joint_position_to_sim_mask_after_graph(self) -> None:
+        """Apply Python-side state updates after graph replay of ``write_joint_position_to_sim_mask``."""
+
+        self._mark_joint_position_buffers_dirty()
+
+    def write_joint_velocity_to_sim_mask_after_graph(self) -> None:
+        """Apply Python-side state updates after graph replay of ``write_joint_velocity_to_sim_mask``."""
+
+        self._mark_joint_velocity_buffers_written()
+
     def write_root_pose_to_sim_index(
         self,
         *,
@@ -472,22 +578,8 @@ class Articulation(BaseArticulation):
             ],
             device=self.device,
         )
-        # Need to invalidate the buffer to trigger the update with the new state.
-        # Only invalidate if the buffer has been accessed (not None).
-        if self.data._root_link_state_w is not None:
-            self.data._root_link_state_w.timestamp = -1.0
-        if self.data._root_state_w is not None:
-            self.data._root_state_w.timestamp = -1.0
-        self.data._fk_timestamp = -1.0  # Forces a kinematic update to get the latest body link poses.
+        self._mark_root_link_pose_buffers_dirty()
         SimulationManager.invalidate_fk(env_ids=env_ids, articulation_ids=self._root_view.articulation_ids)
-        if self.data._body_com_pose_w is not None:
-            self.data._body_com_pose_w.timestamp = -1.0
-        if self.data._body_state_w is not None:
-            self.data._body_state_w.timestamp = -1.0
-        if self.data._body_link_state_w is not None:
-            self.data._body_link_state_w.timestamp = -1.0
-        if self.data._body_com_state_w is not None:
-            self.data._body_com_state_w.timestamp = -1.0
 
     def write_root_link_pose_to_sim_mask(
         self,
@@ -529,22 +621,8 @@ class Articulation(BaseArticulation):
             ],
             device=self.device,
         )
-        # Need to invalidate the buffer to trigger the update with the new state.
-        # Only invalidate if the buffer has been accessed (not None).
-        if self.data._root_link_state_w is not None:
-            self.data._root_link_state_w.timestamp = -1.0
-        if self.data._root_state_w is not None:
-            self.data._root_state_w.timestamp = -1.0
-        self.data._fk_timestamp = -1.0  # Forces a kinematic update to get the latest body link poses.
+        self._mark_root_link_pose_buffers_dirty()
         SimulationManager.invalidate_fk(env_mask=env_mask, articulation_ids=self._root_view.articulation_ids)
-        if self.data._body_com_pose_w is not None:
-            self.data._body_com_pose_w.timestamp = -1.0
-        if self.data._body_state_w is not None:
-            self.data._body_state_w.timestamp = -1.0
-        if self.data._body_link_state_w is not None:
-            self.data._body_link_state_w.timestamp = -1.0
-        if self.data._body_com_state_w is not None:
-            self.data._body_com_state_w.timestamp = -1.0
 
     def write_root_com_pose_to_sim_index(
         self,
@@ -766,11 +844,7 @@ class Articulation(BaseArticulation):
             ],
             device=self.device,
         )
-        # Only invalidate if the buffer has been accessed (not None).
-        if self.data._root_state_w is not None:
-            self.data._root_state_w.timestamp = -1.0
-        if self.data._root_com_state_w is not None:
-            self.data._root_com_state_w.timestamp = -1.0
+        self._mark_root_com_velocity_buffers_dirty()
 
     def write_root_com_velocity_to_sim_mask(
         self,
@@ -812,11 +886,7 @@ class Articulation(BaseArticulation):
             ],
             device=self.device,
         )
-        # Only invalidate if the buffer has been accessed (not None).
-        if self.data._root_state_w is not None:
-            self.data._root_state_w.timestamp = -1.0
-        if self.data._root_com_state_w is not None:
-            self.data._root_com_state_w.timestamp = -1.0
+        self._mark_root_com_velocity_buffers_dirty()
 
     def write_root_link_velocity_to_sim_index(
         self,
@@ -1085,23 +1155,8 @@ class Articulation(BaseArticulation):
             ],
             device=self.device,
         )
-        # Invalidate FK timestamp so body poses are recomputed on next access.
-        self.data._fk_timestamp = -1.0
+        self._mark_joint_position_buffers_dirty()
         SimulationManager.invalidate_fk(env_ids=env_ids, articulation_ids=self._root_view.articulation_ids)
-        # Need to invalidate the buffer to trigger the update with the new root pose.
-        # Only invalidate if the buffer has been accessed (not None).
-        if self.data._body_link_vel_w is not None:
-            self.data._body_link_vel_w.timestamp = -1.0
-        if self.data._body_com_pose_b is not None:
-            self.data._body_com_pose_b.timestamp = -1.0
-        if self.data._body_com_pose_w is not None:
-            self.data._body_com_pose_w.timestamp = -1.0
-        if self.data._body_state_w is not None:
-            self.data._body_state_w.timestamp = -1.0
-        if self.data._body_link_state_w is not None:
-            self.data._body_link_state_w.timestamp = -1.0
-        if self.data._body_com_state_w is not None:
-            self.data._body_com_state_w.timestamp = -1.0
 
     def write_joint_position_to_sim_mask(
         self,
@@ -1143,23 +1198,8 @@ class Articulation(BaseArticulation):
             ],
             device=self.device,
         )
-        # Invalidate FK timestamp so body poses are recomputed on next access.
-        self.data._fk_timestamp = -1.0
+        self._mark_joint_position_buffers_dirty()
         SimulationManager.invalidate_fk(env_mask=env_mask, articulation_ids=self._root_view.articulation_ids)
-        # Need to invalidate the buffer to trigger the update with the new root pose.
-        # Only invalidate if the buffer has been accessed (not None).
-        if self.data._body_link_vel_w is not None:
-            self.data._body_link_vel_w.timestamp = -1.0
-        if self.data._body_com_pose_b is not None:
-            self.data._body_com_pose_b.timestamp = -1.0
-        if self.data._body_com_pose_w is not None:
-            self.data._body_com_pose_w.timestamp = -1.0
-        if self.data._body_state_w is not None:
-            self.data._body_state_w.timestamp = -1.0
-        if self.data._body_link_state_w is not None:
-            self.data._body_link_state_w.timestamp = -1.0
-        if self.data._body_com_state_w is not None:
-            self.data._body_com_state_w.timestamp = -1.0
 
     def write_joint_velocity_to_sim_index(
         self,

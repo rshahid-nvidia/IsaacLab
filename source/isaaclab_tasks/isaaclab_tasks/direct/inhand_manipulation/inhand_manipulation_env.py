@@ -50,6 +50,26 @@ def _clear_reset_stats(
 
 
 @wp.kernel
+def _snapshot_inhand_reset_success(
+    env_mask: wp.array(dtype=wp.bool),
+    success_count_threshold: wp.int32,
+    successes: wp.array(dtype=wp.float32),
+    last_episode_success: wp.array(dtype=wp.bool),
+    reset_count: wp.array(dtype=wp.int32),
+    reset_success_count: wp.array(dtype=wp.int32),
+):
+    env_id = wp.tid()
+    if not env_mask[env_id]:
+        return
+
+    was_success = successes[env_id] >= wp.float32(success_count_threshold)
+    last_episode_success[env_id] = was_success
+    wp.atomic_add(reset_count, 0, wp.int32(1))
+    if was_success:
+        wp.atomic_add(reset_success_count, 0, wp.int32(1))
+
+
+@wp.kernel
 def _prepare_inhand_reset(
     env_mask: wp.array(dtype=wp.bool),
     default_object_pose: wp.array(dtype=wp.transformf),
@@ -64,9 +84,9 @@ def _prepare_inhand_reset(
     reset_dof_pos_noise: wp.float32,
     reset_dof_vel_noise: wp.float32,
     num_dofs: wp.int32,
-    success_count_threshold: wp.int32,
     rng_state: wp.array(dtype=wp.uint32),
     successes: wp.array(dtype=wp.float32),
+    reset_goal_buf: wp.array(dtype=wp.bool),
     episode_length_buf: wp.array(dtype=wp.int64),
     goal_rot: wp.array(dtype=wp.quatf),
     object_pose_out: wp.array(dtype=wp.transformf),
@@ -76,18 +96,12 @@ def _prepare_inhand_reset(
     prev_targets: wp.array2d(dtype=wp.float32),
     cur_targets: wp.array2d(dtype=wp.float32),
     hand_dof_targets: wp.array2d(dtype=wp.float32),
-    reset_count: wp.array(dtype=wp.int32),
-    reset_success_count: wp.array(dtype=wp.int32),
 ):
     env_id = wp.tid()
     if not env_mask[env_id]:
         return
 
-    was_success = successes[env_id] >= wp.float32(success_count_threshold)
-    wp.atomic_add(reset_count, 0, wp.int32(1))
-    if was_success:
-        wp.atomic_add(reset_success_count, 0, wp.int32(1))
-
+    reset_goal_buf[env_id] = False
     episode_length_buf[env_id] = wp.int64(0)
 
     rand0 = wp.randf(rng_state[env_id], wp.float32(-1.0), wp.float32(1.0))
@@ -415,6 +429,11 @@ class InHandManipulationEnv(DirectRLEnv):
                 "In-hand manipulation requires the fused Warp reset path; "
                 f"{'; '.join(fused_reset_blockers)}."
             )
+        self._set_joint_pos_target_mask_after_graph = self.hand.set_joint_position_target_mask_after_graph
+        self._write_obj_root_pose_mask_after_graph = self.object.write_root_pose_to_sim_mask_after_graph
+        self._write_obj_root_vel_mask_after_graph = self.object.write_root_velocity_to_sim_mask_after_graph
+        self._write_hand_joint_pos_mask_after_graph = self.hand.write_joint_position_to_sim_mask_after_graph
+        self._write_hand_joint_vel_mask_after_graph = self.hand.write_joint_velocity_to_sim_mask_after_graph
         self._setup_inhand_fused_reset_buffers()
 
         self._configure_reset_cuda_graph(path_name="In-hand reset CUDA graph path")
@@ -436,6 +455,7 @@ class InHandManipulationEnv(DirectRLEnv):
     def _setup_inhand_warp_step_buffers(self) -> None:
         self._episode_length_buf_wp = wp.from_torch(self.episode_length_buf, dtype=wp.int64)
         self._successes_wp = wp.from_torch(self.successes, dtype=wp.float32)
+        self._last_episode_success_wp = wp.from_torch(self._last_episode_success, dtype=wp.bool)
         self._consecutive_successes_wp = wp.from_torch(self.consecutive_successes, dtype=wp.float32)
         self._goal_rot_wp = wp.from_torch(self.goal_rot, dtype=wp.quatf)
         self._in_hand_pos_wp = wp.from_torch(self.in_hand_pos, dtype=wp.vec3f)
@@ -559,6 +579,7 @@ class InHandManipulationEnv(DirectRLEnv):
 
         self._episode_length_buf_wp = wp.from_torch(self.episode_length_buf, dtype=wp.int64)
         self._successes_wp = wp.from_torch(self.successes, dtype=wp.float32)
+        self._last_episode_success_wp = wp.from_torch(self._last_episode_success, dtype=wp.bool)
         self._consecutive_successes_wp = wp.from_torch(self.consecutive_successes, dtype=wp.float32)
         self._goal_rot_wp = wp.from_torch(self.goal_rot, dtype=wp.quatf)
         self._in_hand_pos_wp = wp.from_torch(self.in_hand_pos, dtype=wp.vec3f)
@@ -614,16 +635,44 @@ class InHandManipulationEnv(DirectRLEnv):
         self._reset_object_velocity_wp = wp.zeros(self.num_envs, dtype=wp.spatial_vectorf, device=self.device)
         self._reset_joint_pos_wp = wp.zeros((self.num_envs, self.num_hand_dofs), dtype=wp.float32, device=self.device)
         self._reset_joint_vel_wp = wp.zeros((self.num_envs, self.num_hand_dofs), dtype=wp.float32, device=self.device)
+        self._refresh_inhand_reset_torch_views()
         self._inhand_fused_reset_buffers_ready = True
+
+    def _refresh_inhand_reset_torch_views(self) -> None:
+        """Refresh Torch views for Warp-owned reset buffers after possible Warp array rebinding."""
+
+        self._reset_count_torch = wp.to_torch(self._reset_count_wp)
+        self._reset_success_count_torch = wp.to_torch(self._reset_success_count_wp)
+        self._graph_fingertip_pos_torch = wp.to_torch(self._graph_fingertip_pos_wp)
+        self._graph_fingertip_rot_torch = wp.to_torch(self._graph_fingertip_rot_wp)
+        self._graph_fingertip_velocities_torch = wp.to_torch(self._graph_fingertip_velocities_wp)
+        self._graph_object_pos_torch = wp.to_torch(self._graph_object_pos_wp)
+        self._graph_object_rot_torch = wp.to_torch(self._graph_object_rot_wp)
+        self._graph_object_velocities_torch = wp.to_torch(self._graph_object_velocities_wp)
+        self._graph_object_linvel_torch = wp.to_torch(self._graph_object_linvel_wp)
+        self._graph_object_angvel_torch = wp.to_torch(self._graph_object_angvel_wp)
 
     def _setup_reset_cuda_graph_buffers(self) -> None:
         self._setup_inhand_fused_reset_buffers()
+        self._require_inhand_warp_step("reset CUDA graph")
+        self._require_inhand_fused_reset("reset CUDA graph")
+        self._refresh_inhand_reset_torch_views()
         self._reset_cuda_graph_mask_wp = wp.from_torch(self.reset_buf, dtype=wp.bool)
+        self._clear_reset_cuda_graph_captures()
+
+    def _clear_reset_cuda_graph_captures(self) -> None:
+        super()._clear_reset_cuda_graph_captures()
+        self._reset_common_cuda_graph = None
+        self._reset_apply_cuda_graph = None
 
     def _warmup_reset_cuda_graph(self) -> None:
-        self._launch_inhand_reset_prepare(ResetContext(env_ids=None, reset_mask_wp=self._reset_empty_mask_wp))
+        empty_ctx = ResetContext(env_ids=None, reset_mask_wp=self._reset_empty_mask_wp)
+        self._reset_idx_common_graphable(empty_ctx, reset_episode_lengths=False)
+        self._launch_inhand_task_reset_graphable(empty_ctx)
+        self._prepare_inhand_reset_to_sim_capture_state()
+        self._launch_inhand_reset_to_sim_graphable(empty_ctx)
 
-    def _reset_cuda_graph_tensors(self) -> dict[str, torch.Tensor]:
+    def _reset_cuda_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
         """Return tensors whose storage and metadata must remain stable for reset graph replay."""
 
         tensors = super()._reset_cuda_graph_tensors()
@@ -631,6 +680,8 @@ class InHandManipulationEnv(DirectRLEnv):
             {
                 "episode_length_buf": self.episode_length_buf,
                 "successes": self.successes,
+                "last_episode_success": self._last_episode_success,
+                "reset_goal_buf": self.reset_goal_buf,
                 "goal_rot": self.goal_rot,
                 "scene.env_origins": self.scene.env_origins,
                 "hand_dof_lower_limits": self.hand_dof_lower_limits,
@@ -638,11 +689,62 @@ class InHandManipulationEnv(DirectRLEnv):
                 "prev_targets": self.prev_targets,
                 "cur_targets": self.cur_targets,
                 "hand_dof_targets": self.hand_dof_targets,
+                "reset_mask_wp": self._reset_cuda_graph_mask_wp,
+                "reset_rng_state": self._reset_rng_state_wp,
+                "reset_count": self._reset_count_wp,
+                "reset_success_count": self._reset_success_count_wp,
+                "finger_bodies": self._finger_bodies_wp,
+                "episode_length_buf_wp": self._episode_length_buf_wp,
+                "successes_wp": self._successes_wp,
+                "last_episode_success_wp": self._last_episode_success_wp,
+                "reset_goal_buf_wp": self._reset_goal_buf_wp,
+                "goal_rot_wp": self._goal_rot_wp,
+                "env_origins_wp": self._env_origins_wp,
+                "lower_limits_wp": self._lower_limits_wp,
+                "upper_limits_wp": self._upper_limits_wp,
+                "prev_targets_wp": self._prev_targets_wp,
+                "cur_targets_wp": self._cur_targets_wp,
+                "hand_dof_targets_wp": self._hand_dof_targets_wp,
                 "object.default_root_pose": self.object.data.default_root_pose.torch,
+                "object.default_root_pose_wp": self.object.data.default_root_pose.warp,
                 "hand.default_joint_pos": self.hand.data.default_joint_pos.torch,
+                "hand.default_joint_pos_wp": self.hand.data.default_joint_pos.warp,
                 "hand.default_joint_vel": self.hand.data.default_joint_vel.torch,
+                "hand.default_joint_vel_wp": self.hand.data.default_joint_vel.warp,
+                "reset_object_pose": self._reset_object_pose_wp,
+                "reset_object_velocity": self._reset_object_velocity_wp,
+                "reset_joint_pos": self._reset_joint_pos_wp,
+                "reset_joint_vel": self._reset_joint_vel_wp,
+                "hand.body_link_pose_w": self._hand_body_pose_w_wp,
+                "hand.body_com_vel_w": self._hand_body_vel_w_wp,
+                "object.root_link_pose_w_wp": self._object_root_pose_w_wp,
+                "object.root_com_vel_w_wp": self._object_root_vel_w_wp,
+                "graph_fingertip_pos": self._graph_fingertip_pos_wp,
+                "graph_fingertip_rot": self._graph_fingertip_rot_wp,
+                "graph_fingertip_velocities": self._graph_fingertip_velocities_wp,
+                "graph_object_pos": self._graph_object_pos_wp,
+                "graph_object_rot": self._graph_object_rot_wp,
+                "graph_object_velocities": self._graph_object_velocities_wp,
+                "graph_object_linvel": self._graph_object_linvel_wp,
+                "graph_object_angvel": self._graph_object_angvel_wp,
+                "object.root_link_pose_w": self.object.data.root_link_pose_w.warp,
+                "object.root_com_vel_w": self.object.data.root_com_vel_w.warp,
+                "object.body_com_acc_w": self.object.data._body_com_acc_w.data,
+                "object.root_view.articulation_ids": self.object.root_view.articulation_ids,
+                "hand.root_view.articulation_ids": self.hand.root_view.articulation_ids,
+                "hand.all_joint_mask": self.hand._ALL_JOINT_MASK,
+                "hand.joint_pos_target": self.hand.data._joint_pos_target,
+                "hand.joint_pos": self.hand.data.joint_pos.warp,
+                "hand.joint_vel": self.hand.data.joint_vel.warp,
+                "hand.previous_joint_vel": self.hand.data._previous_joint_vel,
+                "hand.joint_acc": self.hand.data._joint_acc.data,
             }
         )
+        physics_manager = self.sim.physics_manager
+        if getattr(physics_manager, "_world_reset_mask", None) is not None:
+            tensors["physics.world_reset_mask"] = physics_manager._world_reset_mask
+        if getattr(physics_manager, "_fk_reset_mask", None) is not None:
+            tensors["physics.fk_reset_mask"] = physics_manager._fk_reset_mask
         return tensors
 
     def _reset_cuda_graph_constants(self) -> dict[str, float | int]:
@@ -654,6 +756,8 @@ class InHandManipulationEnv(DirectRLEnv):
             "reset_dof_vel_noise": float(self.cfg.reset_dof_vel_noise),
             "success_count_threshold": int(self.cfg.success_count_threshold),
             "num_hand_dofs": int(self.num_hand_dofs),
+            "num_fingertips": int(self.num_fingertips),
+            "object_num_bodies": int(getattr(self.object.data, "_num_bodies", 1)),
         }
 
     def _get_reset_cuda_graph_blockers(self) -> list[str]:
@@ -669,8 +773,13 @@ class InHandManipulationEnv(DirectRLEnv):
             (self.hand, "set_joint_position_target_mask"),
             (self.hand, "write_joint_position_to_sim_mask"),
             (self.hand, "write_joint_velocity_to_sim_mask"),
+            (self.hand, "set_joint_position_target_mask_after_graph"),
+            (self.hand, "write_joint_position_to_sim_mask_after_graph"),
+            (self.hand, "write_joint_velocity_to_sim_mask_after_graph"),
             (self.object, "write_root_pose_to_sim_mask"),
             (self.object, "write_root_velocity_to_sim_mask"),
+            (self.object, "write_root_pose_to_sim_mask_after_graph"),
+            (self.object, "write_root_velocity_to_sim_mask_after_graph"),
         )
         for obj, attr in required:
             if not hasattr(obj, attr):
@@ -689,6 +798,8 @@ class InHandManipulationEnv(DirectRLEnv):
             ("reset_env_mask", self._reset_env_mask, (self.num_envs,), torch.bool),
             ("episode_length_buf", self.episode_length_buf, (self.num_envs,), torch.int64),
             ("successes", self.successes, (self.num_envs,), torch.float32),
+            ("last_episode_success", self._last_episode_success, (self.num_envs,), torch.bool),
+            ("reset_goal_buf", self.reset_goal_buf, (self.num_envs,), torch.bool),
             ("goal_rot", self.goal_rot, (self.num_envs, 4), torch.float32),
             ("scene.env_origins", self.scene.env_origins, (self.num_envs, 3), torch.float32),
             ("hand_dof_lower_limits", self.hand_dof_lower_limits, (self.num_envs, self.num_hand_dofs), torch.float32),
@@ -710,6 +821,8 @@ class InHandManipulationEnv(DirectRLEnv):
         """Refresh Torch-backed Warp views used by direct fused reset kernels."""
 
         self._reset_env_mask_wp = wp.from_torch(self._reset_env_mask, dtype=wp.bool)
+        self._last_episode_success_wp = wp.from_torch(self._last_episode_success, dtype=wp.bool)
+        self._reset_goal_buf_wp = wp.from_torch(self.reset_goal_buf, dtype=wp.bool)
         self._lower_limits_wp = wp.from_torch(self.hand_dof_lower_limits, dtype=wp.float32)
         self._upper_limits_wp = wp.from_torch(self.hand_dof_upper_limits, dtype=wp.float32)
         self._prev_targets_wp = wp.from_torch(self.prev_targets, dtype=wp.float32)
@@ -724,13 +837,9 @@ class InHandManipulationEnv(DirectRLEnv):
             raise RuntimeError(f"In-hand {context} requires the fused Warp reset path, but it is not compatible: {reason}.")
         self._refresh_inhand_fused_reset_buffers()
 
-    def _launch_inhand_reset_prepare(self, ctx: ResetContext) -> None:
-        """Launch pure reset preparation kernels.
+    def _launch_inhand_reset_success_snapshot(self, ctx: ResetContext) -> None:
+        """Snapshot reset success metrics before residual reset hooks can mutate task state."""
 
-        This is the only reset subset captured into the optional CUDA graph. It deliberately excludes the shared
-        :class:`DirectRLEnv` reset sequence, asset writer methods, and ``sim.forward()`` because those methods maintain
-        Python-side state in addition to launching GPU work.
-        """
         wp.launch(
             _clear_reset_stats,
             dim=1,
@@ -739,7 +848,24 @@ class InHandManipulationEnv(DirectRLEnv):
         )
 
         env_mask_wp = ctx.reset_mask_wp
+        wp.launch(
+            _snapshot_inhand_reset_success,
+            dim=self.num_envs,
+            inputs=[
+                env_mask_wp,
+                self.cfg.success_count_threshold,
+                self._successes_wp,
+                self._last_episode_success_wp,
+                self._reset_count_wp,
+                self._reset_success_count_wp,
+            ],
+            device=self.device,
+        )
 
+    def _launch_inhand_task_reset_prepare(self, ctx: ResetContext) -> None:
+        """Prepare task reset buffers after shared reset residual hooks have run."""
+
+        env_mask_wp = ctx.reset_mask_wp
         wp.launch(
             _prepare_inhand_reset,
             dim=self.num_envs,
@@ -757,9 +883,9 @@ class InHandManipulationEnv(DirectRLEnv):
                 self.cfg.reset_dof_pos_noise,
                 self.cfg.reset_dof_vel_noise,
                 self.num_hand_dofs,
-                self.cfg.success_count_threshold,
                 self._reset_rng_state_wp,
                 self._successes_wp,
+                self._reset_goal_buf_wp,
                 self._episode_length_buf_wp,
                 self._goal_rot_wp,
                 self._reset_object_pose_wp,
@@ -769,18 +895,29 @@ class InHandManipulationEnv(DirectRLEnv):
                 self._prev_targets_wp,
                 self._cur_targets_wp,
                 self._hand_dof_targets_wp,
-                self._reset_count_wp,
-                self._reset_success_count_wp,
             ],
             device=self.device,
         )
 
-    def _apply_inhand_reset_to_sim(self, ctx: ResetContext) -> None:
-        """Write prepared reset buffers to simulation and refresh in-hand intermediate state.
+    def _launch_inhand_task_reset_graphable(self, ctx: ResetContext) -> None:
+        """Launch graph-capturable task reset kernels.
 
-        This intentionally stays outside CUDA graph replay because the asset writer APIs also update Python-side lazy
-        buffer timestamps and FK invalidation state.
+        This deliberately excludes the shared :class:`DirectRLEnv` residual reset sequence, asset writer methods, and
+        ``sim.forward()`` because those methods maintain Python-side state in addition to launching GPU work.
         """
+
+        self._launch_inhand_reset_success_snapshot(ctx)
+        self._launch_inhand_task_reset_prepare(ctx)
+
+    def _prepare_inhand_reset_to_sim_capture_state(self) -> None:
+        """Force lazy writer output dependencies to be captured explicitly."""
+
+        self.object.data._body_com_acc_w.timestamp = -1.0
+        self.hand.data._joint_acc.timestamp = -1.0
+
+    def _launch_inhand_reset_to_sim_graphable(self, ctx: ResetContext) -> None:
+        """Launch graph-capturable simulation writes and derived in-hand reset state."""
+
         env_mask_wp = ctx.reset_mask_wp
 
         self._write_obj_root_pose_mask(root_pose=self._reset_object_pose_wp, env_mask=env_mask_wp)
@@ -817,6 +954,21 @@ class InHandManipulationEnv(DirectRLEnv):
             device=self.device,
         )
 
+    def _apply_inhand_reset_to_sim_after_graph(self) -> None:
+        """Update Python-side lazy state after replaying graph-captured reset writes."""
+
+        self._write_obj_root_pose_mask_after_graph()
+        self._write_obj_root_vel_mask_after_graph()
+        self._set_joint_pos_target_mask_after_graph()
+        self._write_hand_joint_pos_mask_after_graph()
+        self._write_hand_joint_vel_mask_after_graph()
+
+    def _apply_inhand_reset_to_sim(self, ctx: ResetContext) -> None:
+        """Write prepared reset buffers to simulation and refresh in-hand intermediate state."""
+
+        self._launch_inhand_reset_to_sim_graphable(ctx)
+        self._apply_inhand_reset_to_sim_after_graph()
+
     def _publish_inhand_intermediate_values(self) -> None:
         """Point observation inputs at the persistent buffers produced by fused Warp kernels."""
         self.fingertip_pos = self._graph_fingertip_pos_torch
@@ -830,14 +982,32 @@ class InHandManipulationEnv(DirectRLEnv):
         self.object_linvel = self._graph_object_linvel_torch
         self.object_angvel = self._graph_object_angvel_torch
 
-    def _capture_inhand_reset_prepare_cuda_graph(self):
-        """Capture the pure reset preparation kernels on a non-blocking stream in relaxed mode."""
+    def _capture_inhand_common_reset_cuda_graph(self):
+        """Capture graph-capturable common reset kernels on a non-blocking stream in relaxed mode."""
+
         ctx = ResetContext(env_ids=None, reset_mask_wp=self._reset_cuda_graph_mask_wp)
         return capture_cuda_graph_relaxed(
-            self.device, lambda: self._launch_inhand_reset_prepare(ctx)
+            self.device, lambda: self._reset_idx_common_graphable(ctx, reset_episode_lengths=False)
         )
 
-    def _reset_idx_cuda_graph_impl(self, ctx: ResetContext) -> bool:
+    def _capture_inhand_task_reset_cuda_graph(self):
+        """Capture graph-capturable task reset kernels on a non-blocking stream in relaxed mode."""
+
+        ctx = ResetContext(env_ids=None, reset_mask_wp=self._reset_cuda_graph_mask_wp)
+        return capture_cuda_graph_relaxed(
+            self.device, lambda: self._launch_inhand_task_reset_graphable(ctx)
+        )
+
+    def _capture_inhand_apply_reset_cuda_graph(self):
+        """Capture graph-capturable reset writes and immediate derived-state refresh."""
+
+        ctx = ResetContext(env_ids=None, reset_mask_wp=self._reset_cuda_graph_mask_wp)
+        self._prepare_inhand_reset_to_sim_capture_state()
+        return capture_cuda_graph_relaxed(
+            self.device, lambda: self._launch_inhand_reset_to_sim_graphable(ctx)
+        )
+
+    def _reset_idx_cuda_graph_impl(self, ctx: ResetContext) -> torch.Tensor | None:
         return self._run_inhand_fused_reset(ctx, use_cuda_graph=True)
 
     def _setup_scene(self):
@@ -1026,38 +1196,65 @@ class InHandManipulationEnv(DirectRLEnv):
             return env_ids.to(device=self.device, dtype=torch.int32)
         return torch.tensor(env_ids, dtype=torch.int32, device=self.device)
 
-    def _run_inhand_fused_reset(self, ctx: ResetContext, *, use_cuda_graph: bool) -> bool:
-        if ctx.env_ids is None:
-            if use_cuda_graph:
-                return self._disable_reset_cuda_graph("fused reset requires concrete env_ids")
+    def _materialize_reset_context_env_ids(self, ctx: ResetContext) -> tuple[ResetContext, bool]:
+        """Return a reset context with concrete env ids for residual Python reset hooks."""
+
+        if ctx.env_ids is not None:
+            return ctx, False
+
+        env_ids = self._reset_env_ids_from_reset_buf()
+        return ResetContext(env_ids=env_ids, reset_mask_wp=ctx.reset_mask_wp), True
+
+    def _run_inhand_fused_reset(self, ctx: ResetContext, *, use_cuda_graph: bool) -> torch.Tensor | None:
+        if ctx.env_ids is None and not use_cuda_graph:
             raise ValueError("Fused in-hand reset requires concrete env_ids.")
 
-        env_ids_long = ctx.env_ids.to(dtype=torch.long)
-        self._last_episode_success[env_ids_long] = self.successes[env_ids_long] >= self.cfg.success_count_threshold
-
-        self._reset_idx_common(ctx.env_ids, reset_episode_lengths=False)
-
         if use_cuda_graph:
+            if self._reset_common_cuda_graph is None:
+                try:
+                    self._reset_common_cuda_graph = self._capture_inhand_common_reset_cuda_graph()
+                except Exception as exc:
+                    reason = f"common reset capture failed: {exc}"
+                    self._disable_reset_cuda_graph(reason)
+                    return None
             if self._reset_cuda_graph is None:
                 try:
-                    self._reset_cuda_graph = self._capture_inhand_reset_prepare_cuda_graph()
+                    self._reset_cuda_graph = self._capture_inhand_task_reset_cuda_graph()
                 except Exception as exc:
-                    reason = f"capture failed: {exc}"
-                    return self._disable_reset_cuda_graph(reason)
-            replay_stream = launch_cuda_graph_on_current_torch_stream(self.device, self._reset_cuda_graph)
+                    reason = f"task reset capture failed: {exc}"
+                    self._disable_reset_cuda_graph(reason)
+                    return None
+            if self._reset_apply_cuda_graph is None:
+                try:
+                    self._reset_apply_cuda_graph = self._capture_inhand_apply_reset_cuda_graph()
+                except Exception as exc:
+                    reason = f"apply reset capture failed: {exc}"
+                    self._disable_reset_cuda_graph(reason)
+                    return None
+            replay_stream = launch_cuda_graph_on_current_torch_stream(self.device, self._reset_common_cuda_graph)
             with wp.ScopedStream(replay_stream, sync_enter=False):
-                self._apply_inhand_reset_to_sim(ctx)
+                ctx, env_ids_from_reset_mask = self._materialize_reset_context_env_ids(ctx)
+                if env_ids_from_reset_mask and len(ctx.env_ids) == 0:
+                    return ctx.env_ids
+                self._reset_idx_common_after_graph(ctx, reset_episode_lengths=False)
+                replay_stream = launch_cuda_graph_on_current_torch_stream(self.device, self._reset_cuda_graph)
+            with wp.ScopedStream(replay_stream, sync_enter=False):
+                replay_stream = launch_cuda_graph_on_current_torch_stream(self.device, self._reset_apply_cuda_graph)
+            with wp.ScopedStream(replay_stream, sync_enter=False):
+                self._apply_inhand_reset_to_sim_after_graph()
         else:
-            self._launch_inhand_reset_prepare(ctx)
+            self._launch_inhand_reset_success_snapshot(ctx)
+            self._reset_idx_common_graphable(ctx, reset_episode_lengths=False)
+            self._reset_idx_common_after_graph(ctx, reset_episode_lengths=False)
+            self._launch_inhand_task_reset_prepare(ctx)
             self._apply_inhand_reset_to_sim(ctx)
 
         self._finish_inhand_fused_reset(ctx)
-        return True
+        return ctx.env_ids
 
     def _finish_inhand_fused_reset(self, ctx: ResetContext) -> None:
         if ctx.env_ids is None:
             raise ValueError("In-hand fused reset requires concrete env_ids.")
-        self.reset_goal_buf[ctx.env_ids.to(dtype=torch.long)] = False
         self._publish_inhand_intermediate_values()
         self._publish_inhand_reset_metrics()
 

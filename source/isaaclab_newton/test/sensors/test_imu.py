@@ -174,6 +174,52 @@ def test_reset(sim):
     torch.testing.assert_close(lin_acc_after, torch.zeros_like(lin_acc_after))
 
 
+def test_reset_graph_split_resets_super_and_imu_buffers(sim):
+    """Graphable reset should match IMU reset semantics for base sensor timestamps and IMU buffers."""
+    scene_cfg = ImuTestSceneCfg(num_envs=3)
+    scene = InteractiveScene(scene_cfg)
+    sim.reset()
+
+    imu: Imu = scene["imu"]
+    env_mask_torch = torch.tensor([True, False, True], dtype=torch.bool, device=sim.device)
+    env_mask_wp = wp.from_torch(env_mask_torch, dtype=wp.bool)
+
+    ang_vel = wp.to_torch(imu._data._ang_vel_b)
+    lin_acc = wp.to_torch(imu._data._lin_acc_b)
+    timestamp = wp.to_torch(imu._timestamp)
+    timestamp_last_update = wp.to_torch(imu._timestamp_last_update)
+    is_outdated = wp.to_torch(imu._is_outdated)
+
+    ang_vel[:] = torch.arange(9, dtype=torch.float32, device=sim.device).reshape(3, 3) + 1.0
+    lin_acc[:] = -ang_vel
+    timestamp[:] = torch.arange(3, dtype=torch.float32, device=sim.device) + 3.0
+    timestamp_last_update[:] = torch.arange(3, dtype=torch.float32, device=sim.device) + 7.0
+    is_outdated[:] = False
+
+    keep_ang_vel = ang_vel[~env_mask_torch].clone()
+    keep_lin_acc = lin_acc[~env_mask_torch].clone()
+    keep_timestamp = timestamp[~env_mask_torch].clone()
+    keep_timestamp_last_update = timestamp_last_update[~env_mask_torch].clone()
+
+    imu.reset_graphable(env_mask=env_mask_wp)
+    imu.reset_after_graph(env_mask=env_mask_wp)
+    if "cuda" in sim.device:
+        torch.cuda.synchronize()
+
+    torch.testing.assert_close(ang_vel[env_mask_torch], torch.zeros_like(ang_vel[env_mask_torch]))
+    torch.testing.assert_close(lin_acc[env_mask_torch], torch.zeros_like(lin_acc[env_mask_torch]))
+    torch.testing.assert_close(timestamp[env_mask_torch], torch.zeros_like(timestamp[env_mask_torch]))
+    torch.testing.assert_close(
+        timestamp_last_update[env_mask_torch], torch.zeros_like(timestamp_last_update[env_mask_torch])
+    )
+    assert is_outdated[env_mask_torch].all()
+    torch.testing.assert_close(ang_vel[~env_mask_torch], keep_ang_vel)
+    torch.testing.assert_close(lin_acc[~env_mask_torch], keep_lin_acc)
+    torch.testing.assert_close(timestamp[~env_mask_torch], keep_timestamp)
+    torch.testing.assert_close(timestamp_last_update[~env_mask_torch], keep_timestamp_last_update)
+    assert not is_outdated[~env_mask_torch].any()
+
+
 @configclass
 class FreefallSceneCfg(InteractiveSceneCfg):
     """Scene with a rigid cube and IMU but no ground plane (freefall)."""

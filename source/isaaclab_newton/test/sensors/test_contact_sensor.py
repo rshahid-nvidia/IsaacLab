@@ -26,6 +26,7 @@ import math
 
 import pytest
 import torch
+import warp as wp
 from physics.physics_test_utils import (
     COLLISION_PIPELINES,
     STABLE_SHAPES,
@@ -66,6 +67,59 @@ class ContactSensorTestSceneCfg(InteractiveSceneCfg):
 
 
 SIM_DT = 1.0 / 120.0
+
+
+def test_reset_graph_split_resets_super_and_contact_buffers():
+    """Graphable reset should match ContactSensor reset semantics for base timestamps and contact buffers."""
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    sim_cfg = make_sim_cfg(use_mujoco_contacts=False, device=device)
+
+    with build_simulation_context(sim_cfg=sim_cfg, auto_add_lighting=True, add_ground_plane=True) as sim:
+        scene_cfg = ContactSensorTestSceneCfg(num_envs=3, env_spacing=5.0, lazy_sensor_update=False)
+        scene_cfg.object_a = create_shape_cfg(
+            ShapeType.BOX,
+            "{ENV_REGEX_NS}/Object",
+            pos=(0.0, 0.0, 1.0),
+            disable_gravity=False,
+            activate_contact_sensors=True,
+        )
+        scene_cfg.contact_sensor_a = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/Object",
+            update_period=0.0,
+            history_length=2,
+            track_air_time=True,
+        )
+
+        scene = InteractiveScene(scene_cfg)
+        sim.reset()
+        scene.reset()
+
+        contact_sensor: ContactSensor = scene["contact_sensor_a"]
+        env_mask_torch = torch.tensor([True, False, True], dtype=torch.bool, device=device)
+        env_mask_wp = wp.from_torch(env_mask_torch, dtype=wp.bool)
+
+        tensors = {name: wp.to_torch(tensor) for name, tensor in contact_sensor.reset_graph_tensors().items()}
+        for tensor in tensors.values():
+            if tensor.dtype == torch.bool:
+                tensor[:] = False
+            else:
+                tensor[:] = torch.arange(tensor.numel(), dtype=tensor.dtype, device=tensor.device).reshape(
+                    tensor.shape
+                ) + 1
+
+        kept = {name: tensor[~env_mask_torch].clone() for name, tensor in tensors.items()}
+
+        contact_sensor.reset_graphable(env_mask=env_mask_wp)
+        contact_sensor.reset_after_graph(env_mask=env_mask_wp)
+        if "cuda" in device:
+            torch.cuda.synchronize()
+
+        assert tensors["is_outdated"][env_mask_torch].all()
+        for name, tensor in tensors.items():
+            if name != "is_outdated":
+                torch.testing.assert_close(tensor[env_mask_torch], torch.zeros_like(tensor[env_mask_torch]))
+            torch.testing.assert_close(tensor[~env_mask_torch], kept[name])
 
 
 # ===================================================================

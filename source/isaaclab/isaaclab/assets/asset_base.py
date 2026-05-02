@@ -228,6 +228,31 @@ class AssetBase(ABC):
         """
         raise NotImplementedError
 
+    def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Launch graph-capturable reset work, if supported by the asset.
+
+        The default implementation is intentionally empty. Assets that opt in to graph reset support should put only
+        capturable tensor/kernel work here and keep :meth:`reset` as the full semantic reset.
+        """
+
+    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Run reset work that remains outside CUDA graph replay.
+
+        Unsupported assets fall back to their existing full reset implementation.
+        """
+
+        if env_ids is None and env_mask is not None:
+            raise ValueError(
+                f"{type(self).__name__} does not implement mask-native graph reset fallback; pass env_ids or "
+                "override reset_after_graph()."
+            )
+        self.reset(env_ids)
+
+    def reset_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
+        """Return tensors whose storage is captured by :meth:`reset_graphable`."""
+
+        return {}
+
     @abstractmethod
     def write_data_to_sim(self):
         """Writes data to the simulator."""

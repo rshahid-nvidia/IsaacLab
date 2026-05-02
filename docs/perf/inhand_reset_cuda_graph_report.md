@@ -19,14 +19,27 @@ Branch: `rshahid/newton-perf-iter`
 
 ## Current Design
 
-The in-hand reset implementation is split into three phases:
+The reset API is now split by responsibility instead of by task-specific special cases:
 
-1. `_reset_idx_common(...)`
-   - Preserves the parent `DirectRLEnv` reset contract: scene reset, reset events, noise reset, and optionally episode length reset.
-2. `_launch_inhand_reset_prepare(...)`
+1. `reset(...)`
+   - Remains the full semantic reset.
+   - For scene resets without `env_mask`, `InteractiveScene.reset()` preserves the old per-entity reset order.
+2. `reset_graphable(...)`
+   - Optional graph-capturable tensor/kernel work.
+   - Default asset implementation is a no-op; `SensorBase` resets its base timestamp/outdated buffers.
+3. `reset_after_graph(...)`
+   - Residual Python or non-graph-safe state.
+   - Default asset/sensor fallback calls the old full `reset(...)` when concrete `env_ids` are available.
+
+The in-hand reset implementation uses the split in this order:
+
+1. `_reset_idx_common_graphable(...)`
+   - Captures graphable pieces of the parent `DirectRLEnv` reset sequence, currently scene graphable reset work and optional episode-length reset.
+2. `_reset_idx_common_after_graph(...)`
+   - Runs the parent residual work: scene `reset_after_graph`, reset events, action noise reset, and observation noise reset.
+3. `_launch_inhand_task_reset_graphable(...)`
    - Runs fused Warp kernels that prepare goal rotation, object pose/velocity, hand joint pos/vel, target tensors, episode length reset, success clearing, and reset metrics inputs.
-   - This is the only part captured by the optional reset CUDA graph.
-3. `_apply_inhand_reset_to_sim(...)`
+4. `_apply_inhand_reset_to_sim(...)`
    - Applies the prepared buffers through the asset writer APIs:
      - object root pose
      - object root velocity
@@ -35,7 +48,28 @@ The in-hand reset implementation is split into three phases:
      - hand joint velocity
    - Then calls `sim.forward()`, refreshes Warp state inputs, and recomputes intermediate values.
 
-The `_apply_inhand_reset_to_sim()` ordering matches the old task-specific reset write order. The only meaningful ordering difference is that `successes[env] = 0` now happens inside the prepare kernel before sim writes. That is safe because parent reset/events/noise and reset success accounting happen before the clear, and the writer APIs do not depend on `successes`.
+The CUDA-graph mode uses three separate graphs to avoid reordering parent residual work after task reset work:
+
+1. Replay common reset graph.
+2. Run common residual reset outside graph.
+3. Replay in-hand task reset graph.
+4. Replay the graph-captured simulation writes and immediate intermediate recompute.
+5. Run Python-side writer after-graph hooks.
+
+The non-graph fused mode uses the same ordering with direct kernel launches instead of graph replay. The
+`_apply_inhand_reset_to_sim()` ordering matches the old task-specific reset write order. The only meaningful task-local
+ordering difference is that `successes[env] = 0` happens inside the task graphable kernel before sim writes. That is safe
+because parent reset/events/noise and reset success accounting happen before the clear, and the writer APIs do not depend
+on `successes`.
+
+Graph-aware scene support currently covers Newton external-wrench composers on rigid objects, rigid object collections,
+and articulations, plus Newton IMU/PVA/ContactSensor data reset. `SensorBase.reset_graphable(...)` owns the base
+timestamp/outdated-buffer reset and returns the resolved mask; sensor child classes call `super().reset_graphable(...)`
+and then launch only their own sensor-specific reset kernels. Unsupported entities use the base fallback path.
+
+Actuator resets remain outside graph capture. Implicit and ideal PD actuators are no-op resets. Delayed and learned
+actuators mutate delay/history tensors and may use reset-time randomness, so they need separate mask/graph-safe support
+before being moved into `reset_graphable(...)`.
 
 ## Correctness Status
 
@@ -51,16 +85,33 @@ env -u VIRTUAL_ENV CONDA_PREFIX=/home/rshahid/miniconda3/envs/env_isaaclab \
 
 Passed:
 
-- `-m py_compile source/isaaclab/isaaclab/envs/direct_rl_env.py source/isaaclab/isaaclab/envs/direct_rl_env_cfg.py source/isaaclab/isaaclab/envs/cuda_graph.py source/isaaclab_tasks/isaaclab_tasks/direct/inhand_manipulation/inhand_manipulation_env.py source/isaaclab_tasks/test/test_inhand_reset_cuda_graph.py source/isaaclab/test/envs/test_cuda_graph_replay_guard.py source/isaaclab_newton/test/assets/test_rigid_object_reset_kitless.py`
+- `-m py_compile` on all changed source and test files.
 - `git diff --check`
 - `-m pytest source/isaaclab_tasks/test/test_inhand_reset_cuda_graph.py -q --tb=short`
-  - `41 passed, 159 warnings in 108.36s`
-- `-m pytest source/isaaclab/test/envs/test_cuda_graph_replay_guard.py -q`
-  - `5 passed in 2.08s`
-- `-m pytest source/isaaclab_newton/test/assets/test_rigid_object_reset_kitless.py -q --tb=short`
-  - `2 passed, 37 warnings in 21.53s`
+  - `57 passed, 195 warnings in 139.83s`
+- `-m pytest source/isaaclab/test/scene/test_interactive_scene.py -q --tb=short`
+  - `12 passed, 43 warnings in 11.50s`
+- `-m pytest source/isaaclab/test/envs/test_cuda_graph_replay_guard.py -q --tb=short`
+  - `7 passed in 2.77s`
 - `-m pytest source/isaaclab/test/utils/test_wrench_composer.py -q --tb=short`
-  - `366 passed in 11.95s`
+  - `370 passed in 11.55s`
+- `-m pytest source/isaaclab_newton/test/sensors/test_imu.py source/isaaclab_newton/test/sensors/test_pva.py source/isaaclab_newton/test/sensors/test_contact_sensor.py -q --tb=short`
+  - `99 passed, 6 xpassed, 880 warnings in 451.21s`
+- `-m pytest source/isaaclab_newton/test/assets/test_rigid_object_reset_kitless.py source/isaaclab_newton/test/assets/test_rigid_object_collection.py::test_reset_object_collection -q --tb=short`
+  - `12 passed, 143 warnings in 38.25s`
+
+Review feedback addressed after `docs/perf/reset_optimization_review.md`:
+
+- Expanded the in-hand reset CUDA graph replay guard to cover all task/apply graph Warp arrays, persistent output
+  buffers, Newton FK reset masks, articulation id maps, joint masks, and relevant scalar constants.
+- Split reset success accounting into a pre-residual snapshot kernel so reset events that mutate `successes` do not
+  change `_last_episode_success` in the non-graph fused reset path.
+- Added a true step-entry no-reset test with `ctx.env_ids is None` after graph capture.
+- Added graph-reset goal-marker visualization coverage with `_should_sync_goal_markers()` forced true.
+- Documented and tested the scene split ordering: graph capture batches graphable work before residual work, while
+  `InteractiveScene.reset(env_mask=...)` preserves per-entity semantic composition.
+- Moved base sensor timestamp/outdated buffers into `SensorBase.reset_graph_tensors()` and made Newton sensor overrides
+  extend `super().reset_graph_tensors()`.
 
 Additional isolated/manual checks:
 
@@ -68,10 +119,11 @@ Additional isolated/manual checks:
 - The same PhysX checks caused an ordering/lifetime problem when appended after the full Newton in-hand test file, so they were not committed into the default test file. Do not treat PhysX graph/reset compatibility as fully validated from this work.
 - Earlier grouped `warp_dones` selection had one transient `SIGSEGV`; the individual tests and final full Newton in-hand file passed afterward.
 
-Confidence:
+Current confidence:
 
-- High for the covered Newton/CUDA in-hand reset, dones, rewards, guard, and wrench-reset paths.
-- Not 100% global correctness. Full repo tests and broader task coverage were not run.
+- High for the covered Newton/CUDA in-hand reset, dones, rewards, replay guard, scene reset split, WrenchComposer reset,
+  Newton rigid-object/collection reset, and Newton IMU/PVA/ContactSensor reset split paths.
+- Not global correctness. Full repository tests and broader task coverage were not run.
 
 ## Trace
 
@@ -105,11 +157,20 @@ Fused Warp kernels with reset CUDA graph forced (`env.reset_cuda_graph=force`):
 - `/tmp/nsys_reset_cuda_graph_force_fused_rewards.log`
 - `/tmp/nsys_reset_cuda_graph_force_fused_rewards_json/benchmark_non_rl_Isaac-Repose-Cube-Allegro-Direct-v0_2026-05-01_04-05-59.json`
 
+Current working tree after split graph-reset API refactor (`env.reset_cuda_graph=force`):
+
+- `/home/rshahid/Projects/isaac/reset_current_graph_split_force.nsys-rep`
+- `/home/rshahid/Projects/isaac/reset_current_graph_split_force.sqlite`
+- `/tmp/nsys_reset_current_graph_split_force.log`
+- `/tmp/nsys_reset_current_graph_split_force_json/benchmark_non_rl_Isaac-Repose-Cube-Allegro-Direct-v0_2026-05-01_13-25-51.json`
+
 Headline benchmark JSON stats:
 
 - Baseline: mean step time 52.50 ms; mean step FPS 27.54; mean effective FPS 28197.67.
 - Fused/no-reset-graph: mean step time 36.72 ms; mean step FPS 30.88; mean effective FPS 31620.33.
 - Fused/reset-graph-force: mean step time 33.82 ms; mean step FPS 33.56; mean effective FPS 34360.48.
+- Current/split-graph-force: mean step time 34.82 ms including first-frame warmup outlier; 30.21 ms excluding frame 0;
+  mean step FPS 33.24 including frame 0; mean effective FPS 34037.24 including frame 0.
 
 Sanity from `nsys stats`:
 
@@ -117,11 +178,16 @@ Sanity from `nsys stats`:
 - Fused/no-reset-graph CUDA API calls: `cudaGraphLaunch_v10000` 120; `cudaLaunchKernel` 3900; `cudaStreamSynchronize` 1710.
 - Fused/reset-graph-force CUDA API calls: `cudaGraphLaunch_v10000` 150; `cudaLaunchKernel` 3810; `cudaStreamSynchronize` 1680.
 - NVTX reset ranges were present in all traces. Baseline `_reset_idx` averaged 6.63 ms, fused/no-reset-graph `_reset_idx` averaged 2.95 ms, and fused/reset-graph-force `_reset_idx` averaged 2.06 ms.
+- Current/split-graph-force CUDA API calls: `cudaGraphLaunch_v10000` 180; `cudaLaunchKernel` 3810;
+  `cudaStreamSynchronize` 1680. NVTX `_reset_idx` averaged 2.12 ms across the captured 30-frame bracket.
 
 ## Known Limitations
 
-- `_reset_idx_common(...)` is still the parent reset body and still uses exact `env_ids`. Its scene reset, reset events, and noise reset work are not fused.
-- Reset CUDA graph capture only covers pure reset-preparation kernels. Asset writer APIs and `sim.forward()` remain outside capture because they update Python-side lazy-buffer/FK state.
+- `_reset_idx_common_after_graph(...)` still requires exact `env_ids` for residual scene fallback, reset events, and noise reset.
+- Reset CUDA graph capture covers graphable parent reset kernels and graphable in-hand task kernels, but not residual parent
+  reset work, asset writer APIs, or `sim.forward()` because those update Python-side lazy-buffer/FK state.
+- `reset_graph_tensors()` is intentionally required for graph-aware entities. CUDA graphs capture raw tensor/Warp-array
+  pointers, so the replay guard must validate storage/metadata stability for graphable scene buffers.
 - Reward computation is intentionally two Warp launches, not one, because `consecutive_successes` depends on a grid-wide reduction. A single parallel kernel would either race or serialize.
 - Goal marker visualization is skipped in non-vision headless paths and kept only when renderer/visualizer state can observe it.
 - The premature base `DirectRLEnv._reset_idx_from_mask()` hook was removed. The current in-hand path still converts `reset_buf` to exact `env_ids` before reset because exact-env side effects still need careful handling.

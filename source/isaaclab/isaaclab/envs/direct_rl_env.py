@@ -18,6 +18,7 @@ from typing import Any, ClassVar
 import gymnasium as gym
 import numpy as np
 import torch
+import warp as wp
 
 from isaaclab.managers import EventManager
 from isaaclab.scene import InteractiveScene
@@ -43,6 +44,13 @@ if has_kit():
 logger = logging.getLogger(__name__)
 
 _RESET_CUDA_GRAPH_MODES = ("off", "auto", "force")
+
+
+@wp.kernel
+def _reset_episode_lengths_by_mask(reset_mask: wp.array(dtype=wp.bool), episode_length_buf: wp.array(dtype=wp.int64)):
+    env_id = wp.tid()
+    if reset_mask[env_id]:
+        episode_length_buf[env_id] = wp.int64(0)
 
 
 class DirectRLEnv(gym.Env):
@@ -457,13 +465,12 @@ class DirectRLEnv(gym.Env):
         torch.logical_or(self.reset_terminated, self.reset_time_outs, out=self.reset_buf)
         self.reward_buf = self._get_rewards()
 
-        # -- reset envs that terminated/timed-out and log the episode information
-        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).squeeze(-1).int()
-        if len(reset_env_ids) > 0:
-            if not self._reset_idx_cuda_graph(reset_env_ids):
-                self._reset_idx(reset_env_ids)
-            # if sensors are added to the scene, make sure we render to reflect changes in reset
-            if self.render_enabled and is_rendering and self.has_rtx_sensors and self.cfg.num_rerenders_on_reset > 0:
+        # -- reset envs that terminated/timed-out and log the episode information.
+        reset_env_ids = self._reset_idx_from_reset_buf()
+
+        # if sensors are added to the scene, make sure we render to reflect changes in reset
+        if self.render_enabled and is_rendering and self.has_rtx_sensors and self.cfg.num_rerenders_on_reset > 0:
+            if len(reset_env_ids) > 0:
                 for _ in range(self.cfg.num_rerenders_on_reset):
                     self.sim.render()
 
@@ -646,6 +653,31 @@ class DirectRLEnv(gym.Env):
         """
         self._reset_idx_common(env_ids)
 
+    def _reset_env_ids_from_reset_buf(self) -> torch.Tensor:
+        """Materialize reset environment ids from :attr:`reset_buf`."""
+
+        return self.reset_buf.nonzero(as_tuple=False).squeeze(-1).int()
+
+    def _reset_idx_from_reset_buf(self) -> torch.Tensor:
+        """Reset environments selected by :attr:`reset_buf`.
+
+        This is the step-time reset entrypoint. It first gives the optional mask-native CUDA graph path a chance to
+        consume the GPU reset mask directly. If that path is unavailable, it falls back to materializing env ids and
+        calling the regular :meth:`_reset_idx` implementation.
+
+        Returns:
+            Materialized environment ids, or an empty tensor when no environments reset.
+        """
+
+        reset_env_ids = self._try_reset_idx_cuda_graph()
+        if reset_env_ids is not None:
+            return reset_env_ids
+
+        reset_env_ids = self._reset_env_ids_from_reset_buf()
+        if len(reset_env_ids) > 0:
+            self._reset_idx(reset_env_ids)
+        return reset_env_ids
+
     def _reset_idx_common(self, env_ids: Sequence[int], *, reset_episode_lengths: bool = True) -> None:
         """Run the shared direct-RL reset sequence.
 
@@ -669,6 +701,40 @@ class DirectRLEnv(gym.Env):
 
         if reset_episode_lengths:
             self.episode_length_buf[env_ids] = 0
+
+    def _reset_idx_common_graphable(self, ctx: ResetContext, *, reset_episode_lengths: bool = True) -> None:
+        """Launch graph-capturable work from the shared direct-RL reset sequence."""
+
+        self.scene.reset_graphable(env_ids=ctx.env_ids, env_mask=ctx.reset_mask_wp)
+
+        if reset_episode_lengths:
+            wp.launch(
+                _reset_episode_lengths_by_mask,
+                dim=self.num_envs,
+                inputs=[
+                    ctx.reset_mask_wp,
+                    wp.from_torch(self.episode_length_buf, dtype=wp.int64),
+                ],
+                device=self.device,
+            )
+
+    def _reset_idx_common_after_graph(self, ctx: ResetContext, *, reset_episode_lengths: bool = True) -> None:
+        """Run shared reset work that remains outside CUDA graph replay."""
+
+        if ctx.env_ids is None:
+            raise ValueError("Common reset residual work requires concrete env_ids.")
+
+        self.scene.reset_after_graph(env_ids=ctx.env_ids, env_mask=ctx.reset_mask_wp)
+
+        if self.cfg.events:
+            if "reset" in self.event_manager.available_modes:
+                env_step_count = self._sim_step_counter // self.cfg.decimation
+                self.event_manager.apply(mode="reset", env_ids=ctx.env_ids, global_env_step_count=env_step_count)
+
+        if self.cfg.action_noise_model:
+            self._action_noise_model.reset(ctx.env_ids)
+        if self.cfg.observation_noise_model:
+            self._observation_noise_model.reset(ctx.env_ids)
 
     def _configure_reset_cuda_graph(self, *, path_name: str = "Reset CUDA graph path") -> None:
         """Configure an optional subclass-provided CUDA graph reset path.
@@ -696,11 +762,11 @@ class DirectRLEnv(gym.Env):
 
         try:
             self._setup_reset_cuda_graph_buffers()
+            self._warmup_reset_cuda_graph()
             self._reset_cuda_graph_guard = CudaGraphReplayGuard(
                 tensors=self._reset_cuda_graph_tensors(),
                 values=self._reset_cuda_graph_constants(),
             )
-            self._warmup_reset_cuda_graph()
         except Exception as exc:
             reason = f"setup/warm-up failed: {exc}"
             if self._reset_cuda_graph_mode == "force":
@@ -729,10 +795,21 @@ class DirectRLEnv(gym.Env):
     def _warmup_reset_cuda_graph(self) -> None:
         """Launch graph reset kernels once before capture so lazy initialization cannot happen inside capture."""
 
-    def _reset_cuda_graph_tensors(self) -> dict[str, torch.Tensor]:
+    def _clear_reset_cuda_graph_captures(self) -> None:
+        """Drop captured reset graphs so they are rebuilt against the current buffers on next replay."""
+
+        self._reset_cuda_graph = None
+
+    def _reset_cuda_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
         """Return tensors whose storage and metadata must remain stable for reset graph replay."""
 
-        return {"reset_buf": self.reset_buf}
+        tensors: dict[str, torch.Tensor | wp.array] = {
+            "reset_buf": self.reset_buf,
+            "episode_length_buf": self.episode_length_buf,
+        }
+        for name, tensor in self.scene.reset_graph_tensors().items():
+            tensors[f"scene.{name}"] = tensor
+        return tensors
 
     def _reset_cuda_graph_constants(self) -> dict[str, float | int | str | bool]:
         """Return scalar values baked into the reset graph capture."""
@@ -749,6 +826,34 @@ class DirectRLEnv(gym.Env):
         logger.log(log_level, "%s disabled: %s", self._reset_cuda_graph_path_name, reason)
         return False
 
+    def _recapture_reset_cuda_graph(self, reason: str) -> bool:
+        """Rebuild reset graph captures after a replay-guard mismatch.
+
+        Storage rebinding and scalar config changes are safe only if all reset buffers are refreshed and every graph is
+        captured again. Metadata/type/device incompatibilities still fail during setup or warm-up and fall back through
+        :meth:`_disable_reset_cuda_graph`.
+        """
+
+        blockers = self._get_reset_cuda_graph_blockers()
+        if blockers:
+            return self._disable_reset_cuda_graph("; ".join(blockers), log_level=logging.INFO)
+
+        try:
+            self._clear_reset_cuda_graph_captures()
+            self._setup_reset_cuda_graph_buffers()
+            self._warmup_reset_cuda_graph()
+            self._reset_cuda_graph_guard = CudaGraphReplayGuard(
+                tensors=self._reset_cuda_graph_tensors(),
+                values=self._reset_cuda_graph_constants(),
+            )
+        except Exception as exc:
+            recapture_reason = f"recapture after {reason} failed: {exc}"
+            return self._disable_reset_cuda_graph(recapture_reason)
+
+        self._reset_cuda_graph_disable_reason = ""
+        logger.info("%s recaptured after %s.", self._reset_cuda_graph_path_name, reason)
+        return True
+
     def _check_reset_cuda_graph_assumptions(self) -> str | None:
         """Return a replay-guard error if reset graph assumptions no longer hold."""
 
@@ -759,37 +864,47 @@ class DirectRLEnv(gym.Env):
             values=self._reset_cuda_graph_constants(),
         )
 
-    def _reset_idx_cuda_graph(self, env_ids: torch.Tensor) -> bool:
+    def _reset_idx_cuda_graph(self, env_ids: torch.Tensor | None = None) -> bool:
+        """Compatibility wrapper returning whether the reset CUDA graph path consumed the reset."""
+
+        return self._try_reset_idx_cuda_graph(env_ids) is not None
+
+    def _try_reset_idx_cuda_graph(self, env_ids: torch.Tensor | None = None) -> torch.Tensor | None:
         """Try to reset environments through a subclass-provided CUDA graph path.
 
-        The default implementation always returns ``False`` so :meth:`_reset_idx` handles the reset. Subclasses that
+        The default implementation always returns ``None`` so :meth:`_reset_idx` handles the reset. Subclasses that
         support reset CUDA graphs should override :meth:`_reset_idx_cuda_graph_impl` instead of this method, then let
         this common wrapper preserve guard checking and fallback behavior.
 
         Args:
-            env_ids: Environment ids selected for reset, matching the argument passed to :meth:`_reset_idx`.
+            env_ids: Environment ids selected for reset, matching the argument passed to :meth:`_reset_idx`. When
+                ``None``, graph-captured work consumes :attr:`reset_buf` through the reset mask and subclass residual
+                hooks may materialize ids later only if they need them.
 
         Returns:
-            ``True`` when the subclass consumed the reset, otherwise ``False`` to fall back to :meth:`_reset_idx`.
+            Materialized environment ids when the subclass consumed the reset and needed ids, or ``None`` to fall back
+            to :meth:`_reset_idx`. An empty tensor is a successful empty reset; only ``None`` means fallback.
         """
         if not self._reset_cuda_graph_enabled:
-            return False
+            return None
         graph_state_error = self._check_reset_cuda_graph_assumptions()
         if graph_state_error is not None:
-            return self._disable_reset_cuda_graph(graph_state_error)
+            if not self._recapture_reset_cuda_graph(graph_state_error):
+                return None
         reset_mask_wp = getattr(self, "_reset_cuda_graph_mask_wp", None)
         if reset_mask_wp is None:
-            return self._disable_reset_cuda_graph("reset mask Warp buffer is not configured")
+            self._disable_reset_cuda_graph("reset mask Warp buffer is not configured")
+            return None
         ctx = ResetContext(env_ids=env_ids, reset_mask_wp=reset_mask_wp)
         return self._reset_idx_cuda_graph_impl(ctx)
 
-    def _reset_idx_cuda_graph_impl(self, ctx: ResetContext) -> bool:
+    def _reset_idx_cuda_graph_impl(self, ctx: ResetContext) -> torch.Tensor | None:
         """Consume a reset through a subclass CUDA graph implementation.
 
-        Subclasses must preserve the observable semantics of :meth:`_reset_idx` for ``ctx.env_ids`` and return
-        ``False`` if they cannot safely consume the reset.
+        Subclasses must preserve the observable semantics of :meth:`_reset_idx` for ``ctx.env_ids`` and return concrete
+        env ids when they materialize them. Return ``None`` if they cannot safely consume the reset.
         """
-        return False
+        return None
 
     def _get_reset_cuda_graph_mode(self) -> str:
         """Return the validated reset CUDA graph mode from the environment config."""
