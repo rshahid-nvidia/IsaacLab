@@ -13,7 +13,7 @@ import weakref
 from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import MISSING
-from typing import Any, ClassVar
+from typing import Any, Callable, ClassVar
 
 import gymnasium as gym
 import numpy as np
@@ -31,7 +31,12 @@ from isaaclab.utils.timer import Timer
 from isaaclab.utils.version import has_kit
 
 from .common import VecEnvObs, VecEnvStepReturn
-from .cuda_graph import CudaGraphReplayGuard, ResetContext
+from .cuda_graph import (
+    CudaGraphReplayGuard,
+    ResetContext,
+    capture_cuda_graph_relaxed,
+    launch_cuda_graph_on_current_torch_stream,
+)
 from .direct_rl_env_cfg import DirectRLEnvCfg
 from .ui import ViewportCameraController
 from .utils.spaces import sample_space, spec_to_gym_space
@@ -44,12 +49,6 @@ if has_kit():
 logger = logging.getLogger(__name__)
 
 _RESET_CUDA_GRAPH_MODES = ("off", "auto", "force")
-
-
-    if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
-
-
-    if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
 
 
 @wp.kernel
@@ -808,6 +807,51 @@ class DirectRLEnv(gym.Env):
         """Drop captured reset graphs so they are rebuilt against the current buffers on next replay."""
 
         self._reset_cuda_graph = None
+
+    def _reset_cuda_graph_capture_context(self) -> ResetContext:
+        """Return the stable mask context used while capturing reset CUDA graph phases."""
+
+        reset_mask_wp = getattr(self, "_reset_cuda_graph_mask_wp", None)
+        if reset_mask_wp is None:
+            raise RuntimeError("reset mask Warp buffer is not configured")
+        return ResetContext(env_ids=None, reset_mask_wp=reset_mask_wp)
+
+    def _capture_reset_cuda_graph_phase(
+        self,
+        phase_name: str,
+        launch_fn: Callable[[ResetContext], None],
+        *,
+        prepare_capture: Callable[[], None] | None = None,
+    ):
+        """Capture one reset phase against the stable reset mask."""
+
+        if prepare_capture is not None:
+            prepare_capture()
+        ctx = self._reset_cuda_graph_capture_context()
+        return capture_cuda_graph_relaxed(self.device, lambda: launch_fn(ctx))
+
+    def _launch_reset_cuda_graph_phase(
+        self,
+        graph_attr: str,
+        phase_name: str,
+        launch_fn: Callable[[ResetContext], None],
+        *,
+        prepare_capture: Callable[[], None] | None = None,
+    ) -> wp.Stream | None:
+        """Capture a reset phase on first use and launch it on the current PyTorch stream."""
+
+        graph = getattr(self, graph_attr)
+        if graph is None:
+            try:
+                graph = self._capture_reset_cuda_graph_phase(
+                    phase_name, launch_fn, prepare_capture=prepare_capture
+                )
+            except Exception as exc:
+                reason = f"{phase_name} capture failed: {exc}"
+                self._disable_reset_cuda_graph(reason)
+                return None
+            setattr(self, graph_attr, graph)
+        return launch_cuda_graph_on_current_torch_stream(self.device, graph)
 
     def _reset_cuda_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
         """Return tensors whose storage and metadata must remain stable for reset graph replay."""

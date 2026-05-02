@@ -24,6 +24,7 @@ import warp as wp
 
 import isaaclab.sim as sim_utils
 from isaaclab.physics import PhysicsEvent, PhysicsManager
+from isaaclab.utils.reset import ResetSelection, is_full_reset_selector
 from isaaclab.utils.version import has_kit
 
 from .kernels import reset_envs_kernel, update_outdated_envs_kernel, update_timestamp_kernel
@@ -428,18 +429,15 @@ class SensorBase(ABC):
         self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None
     ) -> wp.array:
         """Resolve environment indices to a warp array and mask."""
-        if env_ids is None and env_mask is None:
+        if is_full_reset_selector(env_ids, env_mask):
             return self._ALL_ENV_MASK
-        elif env_mask is not None:
+        if env_mask is not None:
             return env_mask
-        else:
-            self._reset_mask.zero_()
-            if isinstance(env_ids, wp.array):
-                env_ids = wp.to_torch(env_ids)
-            if torch.is_tensor(env_ids):
-                env_ids = env_ids.to(device=self._device, dtype=torch.long)
-            self._reset_mask_torch[env_ids] = True
-            return self._reset_mask
+
+        reset_env_ids = ResetSelection(env_ids=env_ids).materialize_env_ids(device=self._device, dtype=torch.long)
+        self._reset_mask.zero_()
+        self._reset_mask_torch[reset_env_ids] = True
+        return self._reset_mask
 
     def _resolve_and_spawn(self, sensor_name: str, **spawn_kwargs) -> None:
         """Resolve physics-body prim paths and spawn the sensor prim if needed.

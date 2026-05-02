@@ -27,6 +27,7 @@ from isaaclab.actuators import ActuatorBase, ActuatorBaseCfg, ImplicitActuator
 from isaaclab.assets.articulation.base_articulation import BaseArticulation
 from isaaclab.physics import PhysicsEvent
 from isaaclab.sim.utils.queries import find_first_matching_prim, get_all_matching_child_prims
+from isaaclab.utils.reset import ResetSelection
 from isaaclab.utils.string import resolve_matching_names, resolve_matching_names_values
 from isaaclab.utils.types import ArticulationActions
 from isaaclab.utils.version import get_isaac_sim_version, has_kit
@@ -258,7 +259,9 @@ class Articulation(BaseArticulation):
 
         reset_env_ids = env_ids
         if env_mask is not None:
-            reset_env_ids = wp.to_torch(env_mask).nonzero(as_tuple=False).squeeze(-1).to(device=self.device)
+            reset_env_ids = ResetSelection(env_ids=env_ids, env_mask=env_mask).materialize_env_ids(
+                device=self.device, dtype=torch.long, full_selector=slice(None)
+            )
         if reset_env_ids is None or (isinstance(reset_env_ids, slice) and reset_env_ids == slice(None)):
             reset_env_ids = slice(None)
         for actuator in self.actuators.values():

@@ -20,7 +20,6 @@ from isaaclab.utils.math import quat_conjugate, quat_mul
 from isaaclab.utils.noise import ConstantNoiseCfg, NoiseModelCfg, NoiseModelWithAdditiveBiasCfg, UniformNoiseCfg
 
 import isaaclab_tasks  # noqa: F401
-import isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_env as inhand_env_module
 from isaaclab_tasks.utils import compute_kit_requirements, launch_simulation, resolve_task_config
 
 
@@ -1665,6 +1664,45 @@ def test_reset_cuda_graph_auto_disables_on_incompatible_graph_assumption_change(
             gym_env.close()
 
 
+def test_reset_cuda_graph_auto_disables_when_recapture_fails(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
+
+    cfg = _make_newton_cfg(_ALLEGRO_TASK, num_envs=4)
+    cfg.reset_cuda_graph = "auto"
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_ALLEGRO_TASK, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            gym_env.reset()
+            env_ids = torch.arange(env.num_envs, dtype=torch.int32, device=env.device)
+            env.reset_buf[:] = True
+            assert env._reset_idx_cuda_graph(env_ids)
+
+            env.prev_targets = env.prev_targets.clone()
+
+            def _fail_setup_reset_cuda_graph_buffers():
+                raise RuntimeError("synthetic recapture failure")
+
+            monkeypatch.setattr(env, "_setup_reset_cuda_graph_buffers", _fail_setup_reset_cuda_graph_buffers)
+            env.reset_buf[:] = True
+
+            assert not env._reset_idx_cuda_graph(env_ids)
+            assert not env._reset_cuda_graph_enabled
+            assert "recapture after prev_targets storage changed failed: synthetic recapture failure" in (
+                env._reset_cuda_graph_disable_reason
+            )
+        finally:
+            gym_env.close()
+
+
 def test_reset_cuda_graph_force_rejects_incompatible_graph_assumption_change():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
@@ -1824,30 +1862,30 @@ def test_reset_cuda_graph_step_uses_mask_before_materializing_env_ids(monkeypatc
             calls = []
             scene_after_graph_calls = []
             original_try_cuda_graph_reset = env._try_reset_idx_cuda_graph
-            original_env_ids_from_reset_buf = env._reset_env_ids_from_reset_buf
+            original_materialize = env._materialize_reset_context_env_ids
             original_scene_reset_after_graph = env.scene.reset_after_graph
 
             def _record_try_cuda_graph_reset(env_ids=None):
                 calls.append(("graph_reset", env_ids is None))
                 return original_try_cuda_graph_reset(env_ids)
 
-            def _record_env_ids_from_reset_buf():
-                calls.append(("nonzero", None))
-                return original_env_ids_from_reset_buf()
+            def _record_materialize(ctx):
+                calls.append(("materialize", ctx.env_ids is None))
+                return original_materialize(ctx)
 
             def _record_scene_reset_after_graph(env_ids=None, env_mask=None):
                 scene_after_graph_calls.append((env_ids, env_mask))
                 return original_scene_reset_after_graph(env_ids=env_ids, env_mask=env_mask)
 
             monkeypatch.setattr(env, "_try_reset_idx_cuda_graph", _record_try_cuda_graph_reset)
-            monkeypatch.setattr(env, "_reset_env_ids_from_reset_buf", _record_env_ids_from_reset_buf)
+            monkeypatch.setattr(env, "_materialize_reset_context_env_ids", _record_materialize)
             monkeypatch.setattr(env.scene, "reset_after_graph", _record_scene_reset_after_graph)
 
             gym_env.step(_zero_actions(env))
             torch.cuda.synchronize()
 
             assert calls[0] == ("graph_reset", True)
-            assert calls[1] == ("nonzero", None)
+            assert calls[1] == ("materialize", True)
             assert len(scene_after_graph_calls) == 1
             assert scene_after_graph_calls[0][1] is None
             assert env._reset_cuda_graph_enabled
@@ -1884,22 +1922,24 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
 
             order = []
             scene_after_graph_calls = []
-            original_launch = inhand_env_module.launch_cuda_graph_on_current_torch_stream
+            original_launch_phase = env._launch_reset_cuda_graph_phase
             original_common_after = env._reset_idx_common_after_graph
             original_scene_reset_after_graph = env.scene.reset_after_graph
             original_apply_after = env._apply_inhand_reset_to_sim_after_graph
             original_noise_reset = env._action_noise_model.reset
 
-            def _record_launch(device, graph):
-                if graph is env._reset_common_cuda_graph:
+            def _record_launch_phase(graph_attr, phase_name, launch_fn, *, prepare_capture=None):
+                if graph_attr == "_reset_common_cuda_graph":
                     order.append("common_graph")
-                elif graph is env._reset_cuda_graph:
+                elif graph_attr == "_reset_cuda_graph":
                     order.append("task_graph")
-                elif graph is env._reset_apply_cuda_graph:
+                elif graph_attr == "_reset_apply_cuda_graph":
                     order.append("apply_graph")
                 else:
                     order.append("unknown_graph")
-                return original_launch(device, graph)
+                return original_launch_phase(
+                    graph_attr, phase_name, launch_fn, prepare_capture=prepare_capture
+                )
 
             def _record_common_after(ctx, *, reset_episode_lengths=True):
                 order.append("common_after")
@@ -1917,7 +1957,7 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
                 order.append("apply_after")
                 return original_apply_after()
 
-            monkeypatch.setattr(inhand_env_module, "launch_cuda_graph_on_current_torch_stream", _record_launch)
+            monkeypatch.setattr(env, "_launch_reset_cuda_graph_phase", _record_launch_phase)
             monkeypatch.setattr(env, "_reset_idx_common_after_graph", _record_common_after)
             monkeypatch.setattr(env.scene, "reset_after_graph", _record_scene_reset_after_graph)
             monkeypatch.setattr(env._action_noise_model, "reset", _record_noise_reset)

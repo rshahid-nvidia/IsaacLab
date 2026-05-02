@@ -5,8 +5,10 @@
 
 import torch
 import warp as wp
+import pytest
 
 from isaaclab.envs.cuda_graph import CudaGraphReplayGuard
+import isaaclab.utils.cuda_graph as cuda_graph_utils
 
 
 def test_cuda_graph_replay_guard_accepts_unchanged_tensors_and_values():
@@ -59,3 +61,11 @@ def test_cuda_graph_replay_guard_detects_warp_array_storage_change():
     guard = CudaGraphReplayGuard(tensors={"array": array})
 
     assert guard.check(tensors={"array": wp.zeros((4, 3), dtype=wp.float32, device="cpu")}) == "array storage changed"
+
+
+def test_relaxed_cuda_graph_capture_requires_cudart_without_explicit_fallback(monkeypatch):
+    monkeypatch.setattr(cuda_graph_utils, "_cudart", None)
+    monkeypatch.setattr(cuda_graph_utils, "_cudart_soname", None)
+
+    with pytest.raises(cuda_graph_utils.CudaGraphCaptureError, match="libcudart"):
+        cuda_graph_utils.capture_cuda_graph_relaxed("cuda:0", lambda: None)

@@ -16,11 +16,7 @@ import warp as wp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
-from isaaclab.envs.cuda_graph import (
-    ResetContext,
-    capture_cuda_graph_relaxed,
-    launch_cuda_graph_on_current_torch_stream,
-)
+from isaaclab.envs.cuda_graph import ResetContext
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
@@ -28,12 +24,6 @@ from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, 
 if TYPE_CHECKING:
     from isaaclab_tasks.direct.allegro_hand.allegro_hand_env_cfg import AllegroHandEnvCfg
     from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg
-
-
-    if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
-
-
-    if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
 
 
 @wp.func
@@ -1007,31 +997,6 @@ class InHandManipulationEnv(DirectRLEnv):
         self.object_linvel = self._graph_object_linvel_torch
         self.object_angvel = self._graph_object_angvel_torch
 
-    def _capture_inhand_common_reset_cuda_graph(self):
-        """Capture graph-capturable common reset kernels on a non-blocking stream in relaxed mode."""
-
-        ctx = ResetContext(env_ids=None, reset_mask_wp=self._reset_cuda_graph_mask_wp)
-        return capture_cuda_graph_relaxed(
-            self.device, lambda: self._reset_idx_common_graphable(ctx, reset_episode_lengths=False)
-        )
-
-    def _capture_inhand_task_reset_cuda_graph(self):
-        """Capture graph-capturable task reset kernels on a non-blocking stream in relaxed mode."""
-
-        ctx = ResetContext(env_ids=None, reset_mask_wp=self._reset_cuda_graph_mask_wp)
-        return capture_cuda_graph_relaxed(
-            self.device, lambda: self._launch_inhand_task_reset_graphable(ctx)
-        )
-
-    def _capture_inhand_apply_reset_cuda_graph(self):
-        """Capture graph-capturable reset writes and immediate derived-state refresh."""
-
-        ctx = ResetContext(env_ids=None, reset_mask_wp=self._reset_cuda_graph_mask_wp)
-        self._prepare_inhand_reset_to_sim_capture_state()
-        return capture_cuda_graph_relaxed(
-            self.device, lambda: self._launch_inhand_reset_to_sim_graphable(ctx)
-        )
-
     def _reset_idx_cuda_graph_impl(self, ctx: ResetContext) -> torch.Tensor | None:
         return self._run_inhand_fused_reset(ctx, use_cuda_graph=True)
 
@@ -1295,44 +1260,42 @@ class InHandManipulationEnv(DirectRLEnv):
         if ctx.env_ids is not None:
             return ctx, False
 
-        env_ids = self._reset_env_ids_from_reset_buf()
-        return ResetContext(env_ids=env_ids, reset_mask_wp=ctx.reset_mask_wp), True
+        env_ids = ctx.selection.materialize_env_ids(device=self.device)
+        return ctx.with_env_ids(env_ids), True
 
     def _run_inhand_fused_reset(self, ctx: ResetContext, *, use_cuda_graph: bool) -> torch.Tensor | None:
         if ctx.env_ids is None and not use_cuda_graph:
             raise ValueError("Fused in-hand reset requires concrete env_ids.")
 
         if use_cuda_graph:
-            if self._reset_common_cuda_graph is None:
-                try:
-                    self._reset_common_cuda_graph = self._capture_inhand_common_reset_cuda_graph()
-                except Exception as exc:
-                    reason = f"common reset capture failed: {exc}"
-                    self._disable_reset_cuda_graph(reason)
-                    return None
-            if self._reset_cuda_graph is None:
-                try:
-                    self._reset_cuda_graph = self._capture_inhand_task_reset_cuda_graph()
-                except Exception as exc:
-                    reason = f"task reset capture failed: {exc}"
-                    self._disable_reset_cuda_graph(reason)
-                    return None
-            if self._reset_apply_cuda_graph is None:
-                try:
-                    self._reset_apply_cuda_graph = self._capture_inhand_apply_reset_cuda_graph()
-                except Exception as exc:
-                    reason = f"apply reset capture failed: {exc}"
-                    self._disable_reset_cuda_graph(reason)
-                    return None
-            replay_stream = launch_cuda_graph_on_current_torch_stream(self.device, self._reset_common_cuda_graph)
+            replay_stream = self._launch_reset_cuda_graph_phase(
+                "_reset_common_cuda_graph",
+                "common reset",
+                lambda graph_ctx: self._reset_idx_common_graphable(graph_ctx, reset_episode_lengths=False),
+            )
+            if replay_stream is None:
+                return None
             with wp.ScopedStream(replay_stream, sync_enter=False):
                 ctx, env_ids_from_reset_mask = self._materialize_reset_context_env_ids(ctx)
                 if env_ids_from_reset_mask and len(ctx.env_ids) == 0:
                     return ctx.env_ids
                 self._reset_idx_common_after_graph(ctx, reset_episode_lengths=False)
-                replay_stream = launch_cuda_graph_on_current_torch_stream(self.device, self._reset_cuda_graph)
+                replay_stream = self._launch_reset_cuda_graph_phase(
+                    "_reset_cuda_graph",
+                    "task reset",
+                    self._launch_inhand_task_reset_graphable,
+                )
+                if replay_stream is None:
+                    return None
             with wp.ScopedStream(replay_stream, sync_enter=False):
-                replay_stream = launch_cuda_graph_on_current_torch_stream(self.device, self._reset_apply_cuda_graph)
+                replay_stream = self._launch_reset_cuda_graph_phase(
+                    "_reset_apply_cuda_graph",
+                    "apply reset",
+                    self._launch_inhand_reset_to_sim_graphable,
+                    prepare_capture=self._prepare_inhand_reset_to_sim_capture_state,
+                )
+                if replay_stream is None:
+                    return None
             with wp.ScopedStream(replay_stream, sync_enter=False):
                 self._apply_inhand_reset_to_sim_after_graph()
         else:

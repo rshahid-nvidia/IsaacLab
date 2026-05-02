@@ -34,6 +34,7 @@ from isaaclab.sim import SimulationContext
 from isaaclab.sim.utils.stage import get_current_stage, get_current_stage_id
 from isaaclab.sim.views import FrameView
 from isaaclab.terrains import TerrainImporter, TerrainImporterCfg
+from isaaclab.utils.reset import ResetSelection
 
 # Note: This is a temporary import for the VisuoTactileSensorCfg class.
 # It will be removed once the VisuoTactileSensor class is added to the core Isaac Lab framework.
@@ -465,43 +466,45 @@ class InteractiveScene:
                 it for mask-native reset work. Defaults to None. When using a mask with mixed entity support, also pass
                 ``env_ids`` so entities that only implement indexed reset can safely run their residual fallback.
         """
+        selection = ResetSelection(env_ids=env_ids, env_mask=env_mask)
 
         if env_mask is None:
             # -- assets
             for articulation in self._articulations.values():
-                articulation.reset(env_ids)
+                articulation.reset(selection.env_ids)
             for deformable_object in self._deformable_objects.values():
-                deformable_object.reset(env_ids)
+                deformable_object.reset(selection.env_ids)
             for rigid_object in self._rigid_objects.values():
-                rigid_object.reset(env_ids)
+                rigid_object.reset(selection.env_ids)
             for surface_gripper in self._surface_grippers.values():
-                surface_gripper.reset(env_ids)
+                surface_gripper.reset(selection.env_ids)
             for rigid_object_collection in self._rigid_object_collections.values():
-                rigid_object_collection.reset(env_ids)
+                rigid_object_collection.reset(selection.env_ids)
             # -- sensors
             for sensor in self._sensors.values():
-                sensor.reset(env_ids)
+                sensor.reset(selection.env_ids)
         else:
+            kwargs = selection.graph_kwargs()
             # -- assets
             for articulation in self._articulations.values():
-                articulation.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-                articulation.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+                articulation.reset_graphable(**kwargs)
+                articulation.reset_after_graph(**kwargs)
             for deformable_object in self._deformable_objects.values():
-                deformable_object.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-                deformable_object.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+                deformable_object.reset_graphable(**kwargs)
+                deformable_object.reset_after_graph(**kwargs)
             for rigid_object in self._rigid_objects.values():
-                rigid_object.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-                rigid_object.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+                rigid_object.reset_graphable(**kwargs)
+                rigid_object.reset_after_graph(**kwargs)
             for surface_gripper in self._surface_grippers.values():
-                surface_gripper.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-                surface_gripper.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+                surface_gripper.reset_graphable(**kwargs)
+                surface_gripper.reset_after_graph(**kwargs)
             for rigid_object_collection in self._rigid_object_collections.values():
-                rigid_object_collection.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-                rigid_object_collection.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+                rigid_object_collection.reset_graphable(**kwargs)
+                rigid_object_collection.reset_after_graph(**kwargs)
             # -- sensors
             for sensor in self._sensors.values():
-                sensor.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-                sensor.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+                sensor.reset_graphable(**kwargs)
+                sensor.reset_after_graph(**kwargs)
 
     def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
         """Launch graph-capturable scene reset work for entities that support it.
@@ -511,20 +514,22 @@ class InteractiveScene:
         residual Python work in their own or another entity's :meth:`reset_after_graph`.
         """
 
+        kwargs = ResetSelection(env_ids=env_ids, env_mask=env_mask).graph_kwargs()
+
         # -- assets
         for articulation in self._articulations.values():
-            articulation.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+            articulation.reset_graphable(**kwargs)
         for deformable_object in self._deformable_objects.values():
-            deformable_object.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+            deformable_object.reset_graphable(**kwargs)
         for rigid_object in self._rigid_objects.values():
-            rigid_object.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+            rigid_object.reset_graphable(**kwargs)
         for surface_gripper in self._surface_grippers.values():
-            surface_gripper.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+            surface_gripper.reset_graphable(**kwargs)
         for rigid_object_collection in self._rigid_object_collections.values():
-            rigid_object_collection.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+            rigid_object_collection.reset_graphable(**kwargs)
         # -- sensors
         for sensor in self._sensors.values():
-            sensor.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+            sensor.reset_graphable(**kwargs)
 
     def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
         """Run scene reset work that remains outside CUDA graph replay.
@@ -534,20 +539,22 @@ class InteractiveScene:
         preserve full-reset semantics outside graph capture.
         """
 
+        kwargs = ResetSelection(env_ids=env_ids, env_mask=env_mask).graph_kwargs()
+
         # -- assets
         for articulation in self._articulations.values():
-            articulation.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            articulation.reset_after_graph(**kwargs)
         for deformable_object in self._deformable_objects.values():
-            deformable_object.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            deformable_object.reset_after_graph(**kwargs)
         for rigid_object in self._rigid_objects.values():
-            rigid_object.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            rigid_object.reset_after_graph(**kwargs)
         for surface_gripper in self._surface_grippers.values():
-            surface_gripper.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            surface_gripper.reset_after_graph(**kwargs)
         for rigid_object_collection in self._rigid_object_collections.values():
-            rigid_object_collection.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            rigid_object_collection.reset_after_graph(**kwargs)
         # -- sensors
         for sensor in self._sensors.values():
-            sensor.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            sensor.reset_after_graph(**kwargs)
 
     def reset_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
         """Return tensors and Warp arrays captured by graph-aware scene reset work."""

@@ -7,32 +7,15 @@
 
 from __future__ import annotations
 
-import contextlib
-import ctypes
-import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import warp as wp
 
-
-logger = logging.getLogger(__name__)
-
-try:
-    _cudart = ctypes.CDLL("libcudart.so.12")
-except OSError:
-    try:
-        _cudart = ctypes.CDLL("libcudart.so")
-    except OSError:
-        _cudart = None
-
-if _cudart is None:
-    logger.warning(
-        "CUDA runtime library was not found; relaxed CUDA graph capture is unavailable and reset graph capture will "
-        "fall back to Warp's strict ScopedCapture."
-    )
+from isaaclab.utils.cuda_graph import capture_cuda_graph_relaxed, launch_cuda_graph_on_current_torch_stream
+from isaaclab.utils.reset import ResetSelection
 
 
 @dataclass(frozen=True)
@@ -41,6 +24,17 @@ class ResetContext:
 
     env_ids: torch.Tensor | None
     reset_mask_wp: wp.array
+
+    @property
+    def selection(self) -> ResetSelection:
+        """Return the normalized reset selector represented by this context."""
+
+        return ResetSelection(env_ids=self.env_ids, env_mask=self.reset_mask_wp)
+
+    def with_env_ids(self, env_ids: torch.Tensor) -> "ResetContext":
+        """Return a copy with concrete environment ids materialized."""
+
+        return type(self)(env_ids=env_ids, reset_mask_wp=self.reset_mask_wp)
 
 
 @dataclass(frozen=True)
@@ -160,75 +154,3 @@ class CudaGraphReplayGuard:
                 return f"{name} was not captured"
 
         return None
-
-
-def capture_cuda_graph_relaxed(device: str, launch_fn: Callable[[], None]):
-    """Capture ``launch_fn`` into a CUDA graph using relaxed stream-capture mode when possible."""
-
-    if _cudart is None:
-        with wp.ScopedCapture() as capture:
-            launch_fn()
-        return capture.graph
-
-    raw_handle = ctypes.c_void_p()
-    ret = _cudart.cudaStreamCreateWithFlags(ctypes.byref(raw_handle), ctypes.c_uint(0x01))
-    if ret != 0:
-        raise RuntimeError(f"cudaStreamCreateWithFlags(cudaStreamNonBlocking) failed with code {ret}")
-    stream_handle = raw_handle.value
-    fresh_stream = wp.Stream(device, cuda_stream=stream_handle, owner=False)
-
-    ret = _cudart.cudaStreamBeginCapture(ctypes.c_void_p(stream_handle), ctypes.c_int(2))
-    if ret != 0:
-        _cudart.cudaStreamDestroy(ctypes.c_void_p(stream_handle))
-        raise RuntimeError(f"cudaStreamBeginCapture(cudaStreamCaptureModeRelaxed) failed with code {ret}")
-
-    try:
-        wp.capture_begin(stream=fresh_stream, external=True)
-    except Exception:
-        raw_graph = ctypes.c_void_p()
-        _cudart.cudaStreamEndCapture(ctypes.c_void_p(stream_handle), ctypes.byref(raw_graph))
-        if raw_graph.value:
-            _cudart.cudaGraphDestroy(raw_graph)
-        _cudart.cudaStreamDestroy(ctypes.c_void_p(stream_handle))
-        raise
-
-    graph = None
-    error: Exception | None = None
-    with wp.ScopedStream(fresh_stream, sync_enter=False):
-        try:
-            launch_fn()
-        except Exception as exc:
-            error = exc
-
-    if error is None:
-        try:
-            graph = wp.capture_end(stream=fresh_stream)
-        except Exception as exc:
-            error = exc
-    else:
-        with contextlib.suppress(Exception):
-            wp.capture_end(stream=fresh_stream)
-
-    raw_graph = ctypes.c_void_p()
-    end_ret = _cudart.cudaStreamEndCapture(ctypes.c_void_p(stream_handle), ctypes.byref(raw_graph))
-    _cudart.cudaStreamDestroy(ctypes.c_void_p(stream_handle))
-
-    if error is not None:
-        if raw_graph.value:
-            _cudart.cudaGraphDestroy(raw_graph)
-        raise error
-    if end_ret != 0 or not raw_graph.value:
-        raise RuntimeError(f"cudaStreamEndCapture failed with code {end_ret}")
-
-    graph.graph = raw_graph
-    graph.graph_exec = None
-    return graph
-
-
-def launch_cuda_graph_on_current_torch_stream(device: str, graph) -> wp.Stream:
-    """Launch ``graph`` on the current PyTorch CUDA stream and return the Warp stream wrapper."""
-
-    torch_stream = torch.cuda.current_stream(torch.device(device))
-    replay_stream = wp.Stream(device, cuda_stream=torch_stream.cuda_stream, owner=False)
-    wp.capture_launch(graph, stream=replay_stream)
-    return replay_stream
