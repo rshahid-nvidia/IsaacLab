@@ -724,7 +724,10 @@ class DirectRLEnv(gym.Env):
         if ctx.env_ids is None:
             raise ValueError("Common reset residual work requires concrete env_ids.")
 
-        self.scene.reset_after_graph(env_ids=ctx.env_ids, env_mask=ctx.reset_mask_wp)
+        # The graphable phase consumes the stable mask. Residual hooks are env-id based and ctx.env_ids has already
+        # been derived from the same mask, so do not forward env_mask here; doing so makes env-id-only residual paths
+        # rematerialize ids with another device nonzero.
+        self.scene.reset_after_graph(env_ids=ctx.env_ids, env_mask=None)
 
         if self.cfg.events:
             if "reset" in self.event_manager.available_modes:

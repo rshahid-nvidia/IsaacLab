@@ -1761,8 +1761,10 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
             gym_env.reset()
 
             order = []
+            scene_after_graph_calls = []
             original_launch = inhand_env_module.launch_cuda_graph_on_current_torch_stream
             original_common_after = env._reset_idx_common_after_graph
+            original_scene_reset_after_graph = env.scene.reset_after_graph
             original_apply_after = env._apply_inhand_reset_to_sim_after_graph
             original_noise_reset = env._action_noise_model.reset
 
@@ -1781,6 +1783,10 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
                 order.append("common_after")
                 return original_common_after(ctx, reset_episode_lengths=reset_episode_lengths)
 
+            def _record_scene_reset_after_graph(env_ids=None, env_mask=None):
+                scene_after_graph_calls.append((env_ids, env_mask))
+                return original_scene_reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
             def _record_noise_reset(env_ids=None):
                 order.append("noise")
                 return original_noise_reset(env_ids)
@@ -1791,6 +1797,7 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
 
             monkeypatch.setattr(inhand_env_module, "launch_cuda_graph_on_current_torch_stream", _record_launch)
             monkeypatch.setattr(env, "_reset_idx_common_after_graph", _record_common_after)
+            monkeypatch.setattr(env.scene, "reset_after_graph", _record_scene_reset_after_graph)
             monkeypatch.setattr(env._action_noise_model, "reset", _record_noise_reset)
             monkeypatch.setattr(env, "_apply_inhand_reset_to_sim_after_graph", _record_apply_after)
 
@@ -1806,6 +1813,9 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
             assert env._reset_apply_cuda_graph is not None
             assert env._reset_common_cuda_graph is not env._reset_cuda_graph
             assert order == ["common_graph", "common_after", "noise", "task_graph", "apply_graph", "apply_after"]
+            assert len(scene_after_graph_calls) == 1
+            torch.testing.assert_close(scene_after_graph_calls[0][0], reset_env_ids)
+            assert scene_after_graph_calls[0][1] is None
         finally:
             gym_env.close()
 
