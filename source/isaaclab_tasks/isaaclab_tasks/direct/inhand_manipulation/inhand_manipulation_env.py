@@ -3,6 +3,10 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Direct in-hand manipulation environments.
+
+See :doc:`/how-to/add_fused_reset_task` for the fused reset task authoring guide.
+"""
 
 from __future__ import annotations
 

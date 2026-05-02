@@ -218,3 +218,14 @@ This guide explains how to profile Isaac Lab tasks with NVIDIA Nsight Systems fo
     :maxdepth: 1
 
     profile_with_nsys
+
+
+Adding a Fused Reset Task
+-------------------------
+
+This guide explains how to add a launch-overhead optimized reset path for Newton-backed direct RL tasks.
+
+.. toctree::
+    :maxdepth: 1
+
+    add_fused_reset_task
