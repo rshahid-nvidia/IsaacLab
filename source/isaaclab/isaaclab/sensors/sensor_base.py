@@ -217,9 +217,7 @@ class SensorBase(ABC):
                 tensors[name] = tensor
         return tensors
 
-    def _reset_base_buffers(
-        self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None
-    ) -> wp.array:
+    def _reset_base_buffers(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> wp.array:
         """Reset base timestamp/outdated buffers and return the resolved environment mask."""
 
         env_mask = self._resolve_indices_and_mask(env_ids, env_mask)

@@ -22,7 +22,6 @@ from isaaclab.utils.noise import ConstantNoiseCfg, NoiseModelCfg, NoiseModelWith
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import compute_kit_requirements, launch_simulation, resolve_task_config
 
-
 pytestmark = pytest.mark.isaacsim_ci
 
 _ALLEGRO_TASK = "Isaac-Repose-Cube-Allegro-Direct-v0"
@@ -631,7 +630,6 @@ def test_reset_cuda_graph_resets_timeout_envs_to_default_state(task: str):
     with launch_simulation(cfg, launcher_args):
         assert not has_kit()
         gym_env = gym.make(task, cfg=cfg)
-        env = gym_env.unwrapped
 
         try:
             gym_env.reset()
@@ -729,6 +727,54 @@ def test_reset_cuda_graph_updates_goal_markers_when_visualization_can_observe(mo
             assert len(calls) == 1
             torch.testing.assert_close(calls[0][0], env.goal_pos + env.scene.env_origins)
             torch.testing.assert_close(calls[0][1], env.goal_rot)
+        finally:
+            gym_env.close()
+
+
+def test_inhand_torch_reward_path_skips_goal_marker_when_unobserved(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the in-hand Torch reward path smoke test.")
+
+    cfg = _make_newton_cfg(_ALLEGRO_TASK, num_envs=4)
+    cfg.reset_cuda_graph = "off"
+    cfg.episode_length_s = 10.0
+    cfg.success_tolerance = 10.0
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_ALLEGRO_TASK, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            gym_env.reset()
+            env._compute_intermediate_values()
+            env._inhand_warp_step_enabled = False
+            env.actions.zero_()
+            env.reset_buf.zero_()
+            env.reset_goal_buf.zero_()
+            env.successes.zero_()
+
+            marker_calls = []
+
+            def _record_visualize(translations=None, orientations=None, scales=None, marker_indices=None):
+                marker_calls.append((translations, orientations))
+
+            monkeypatch.setattr(env, "_should_sync_goal_markers", lambda: False)
+            monkeypatch.setattr(env.goal_markers, "visualize", _record_visualize)
+
+            reward = env._get_rewards()
+            torch.cuda.synchronize()
+
+            assert torch.isfinite(reward).all()
+            assert not env.reset_goal_buf.any()
+            assert marker_calls == []
+            torch.testing.assert_close(
+                torch.linalg.norm(env.goal_rot, dim=-1), torch.ones(env.num_envs, device=env.device)
+            )
         finally:
             gym_env.close()
 
@@ -887,7 +933,9 @@ def test_reset_cuda_graph_partial_reset_preserves_unmasked_envs_and_intermediate
                 torch.tensor([True, False, True], device=env.device),
             )
             torch.testing.assert_close(env.episode_length_buf[reset_env_ids_long], torch.zeros_like(reset_env_ids_long))
-            torch.testing.assert_close(env.successes[reset_env_ids_long], torch.zeros(len(reset_env_ids), device=env.device))
+            torch.testing.assert_close(
+                env.successes[reset_env_ids_long], torch.zeros(len(reset_env_ids), device=env.device)
+            )
             assert not env.reset_goal_buf[reset_env_ids_long].any()
 
             default_joint_pos = env.hand.data.default_joint_pos.torch[reset_env_ids_long]
@@ -991,8 +1039,12 @@ def test_reset_cuda_graph_partial_reset_preserves_unmasked_envs_and_intermediate
             )
             torch.testing.assert_close(env.successes[second_keep_env_ids], second_keep_state["successes"])
             torch.testing.assert_close(env.reset_goal_buf[second_keep_env_ids], second_keep_state["reset_goal_buf"])
-            torch.testing.assert_close(env.hand.data.joint_pos.torch[second_keep_env_ids], second_keep_state["joint_pos"])
-            torch.testing.assert_close(env.hand.data.joint_vel.torch[second_keep_env_ids], second_keep_state["joint_vel"])
+            torch.testing.assert_close(
+                env.hand.data.joint_pos.torch[second_keep_env_ids], second_keep_state["joint_pos"]
+            )
+            torch.testing.assert_close(
+                env.hand.data.joint_vel.torch[second_keep_env_ids], second_keep_state["joint_vel"]
+            )
             torch.testing.assert_close(
                 env.object.data.root_link_pose_w.torch[second_keep_env_ids],
                 second_keep_state["object_pose"],
@@ -1360,9 +1412,8 @@ def test_reset_cuda_graph_replays_many_masks_without_cross_env_writes(task: str)
                     assert env._reset_cuda_graph is graph_object
 
                 expected_success = (
-                    (torch.arange(env.num_envs, device=env.device)[reset_env_ids_long] + iteration)
-                    >= cfg.success_count_threshold
-                )
+                    torch.arange(env.num_envs, device=env.device)[reset_env_ids_long] + iteration
+                ) >= cfg.success_count_threshold
                 torch.testing.assert_close(env._last_episode_success[reset_env_ids_long], expected_success)
                 assert int(env._reset_count_torch.item()) == len(reset_ids_cpu)
                 assert env.extras["log"]["Metrics/success_rate"] == pytest.approx(
@@ -1512,7 +1563,9 @@ def test_reset_cuda_graph_accepts_noncontiguous_env_ids():
             torch.cuda.synchronize()
 
             torch.testing.assert_close(env.episode_length_buf[reset_env_ids], torch.zeros_like(reset_env_ids))
-            torch.testing.assert_close(env.successes[reset_env_ids], torch.zeros_like(reset_env_ids, dtype=torch.float32))
+            torch.testing.assert_close(
+                env.successes[reset_env_ids], torch.zeros_like(reset_env_ids, dtype=torch.float32)
+            )
             torch.testing.assert_close(env.episode_length_buf[keep_env_ids], keep_episode_lengths)
             torch.testing.assert_close(env.successes[keep_env_ids], keep_successes)
             torch.testing.assert_close(env._last_episode_success[reset_env_ids], torch.ones_like(reset_env_ids).bool())
@@ -1703,6 +1756,45 @@ def test_reset_cuda_graph_auto_disables_when_recapture_fails(monkeypatch):
             gym_env.close()
 
 
+def test_reset_cuda_graph_force_raises_when_recapture_fails(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
+
+    cfg = _make_newton_cfg(_ALLEGRO_TASK, num_envs=4)
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_ALLEGRO_TASK, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            gym_env.reset()
+            env_ids = torch.arange(env.num_envs, dtype=torch.int32, device=env.device)
+            env.reset_buf[:] = True
+            assert env._reset_idx_cuda_graph(env_ids)
+
+            env.prev_targets = env.prev_targets.clone()
+
+            def _fail_setup_reset_cuda_graph_buffers():
+                raise RuntimeError("synthetic recapture failure")
+
+            monkeypatch.setattr(env, "_setup_reset_cuda_graph_buffers", _fail_setup_reset_cuda_graph_buffers)
+            env.reset_buf[:] = True
+
+            with pytest.raises(
+                RuntimeError,
+                match="recapture after prev_targets storage changed failed: synthetic recapture failure",
+            ):
+                env._reset_idx_cuda_graph(env_ids)
+            assert not env._reset_cuda_graph_enabled
+        finally:
+            gym_env.close()
+
+
 def test_reset_cuda_graph_force_rejects_incompatible_graph_assumption_change():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
@@ -1825,9 +1917,7 @@ def test_reset_cuda_graph_runs_stateful_noise_reset_outside_graph(monkeypatch):
             assert time_outs.all()
             assert env._reset_cuda_graph is not None
             assert len(reset_calls) == 1
-            torch.testing.assert_close(
-                reset_calls[0], torch.arange(env.num_envs, dtype=torch.int32, device=env.device)
-            )
+            torch.testing.assert_close(reset_calls[0], torch.arange(env.num_envs, dtype=torch.int32, device=env.device))
             assert extras["log"]["Metrics/success_rate"] == pytest.approx(0.0)
             torch.testing.assert_close(env.episode_length_buf, torch.zeros_like(env.episode_length_buf))
             torch.testing.assert_close(env.successes, torch.zeros_like(env.successes))
@@ -1937,9 +2027,7 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
                     order.append("apply_graph")
                 else:
                     order.append("unknown_graph")
-                return original_launch_phase(
-                    graph_attr, phase_name, launch_fn, prepare_capture=prepare_capture
-                )
+                return original_launch_phase(graph_attr, phase_name, launch_fn, prepare_capture=prepare_capture)
 
             def _record_common_after(ctx, *, reset_episode_lengths=True):
                 order.append("common_after")
@@ -2166,7 +2254,9 @@ def test_inhand_warp_rewards_reset_goals_without_nonzero_path():
             assert torch.isfinite(reward).all()
             torch.testing.assert_close(env.successes, torch.ones_like(env.successes))
             assert not env.reset_goal_buf.any()
-            torch.testing.assert_close(torch.linalg.norm(env.goal_rot, dim=-1), torch.ones(env.num_envs, device=env.device))
+            torch.testing.assert_close(
+                torch.linalg.norm(env.goal_rot, dim=-1), torch.ones(env.num_envs, device=env.device)
+            )
             assert not torch.allclose(env.goal_rot, old_goal_rot)
         finally:
             gym_env.close()

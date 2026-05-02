@@ -98,9 +98,7 @@ def _parse_profile_frames() -> tuple[int, int] | None:
     try:
         start_frame, end_frame = (int(value.strip()) for value in profile_frames.split(",", 1))
     except ValueError as exc:
-        raise ValueError(
-            "ISAACLAB_BENCH_PROFILE_FRAMES must use '<start>,<end>' integer frame indices."
-        ) from exc
+        raise ValueError("ISAACLAB_BENCH_PROFILE_FRAMES must use '<start>,<end>' integer frame indices.") from exc
     if start_frame < 0 or end_frame <= start_frame:
         raise ValueError("ISAACLAB_BENCH_PROFILE_FRAMES requires 0 <= start < end.")
     return start_frame, end_frame

@@ -3,12 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+import pytest
 import torch
 import warp as wp
-import pytest
 
-from isaaclab.envs.cuda_graph import CudaGraphReplayGuard
 import isaaclab.utils.cuda_graph as cuda_graph_utils
+from isaaclab.envs.cuda_graph import CudaGraphReplayGuard
 
 
 def test_cuda_graph_replay_guard_accepts_unchanged_tensors_and_values():

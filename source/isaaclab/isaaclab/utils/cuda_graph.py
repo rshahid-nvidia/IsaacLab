@@ -14,7 +14,6 @@ from collections.abc import Callable
 import torch
 import warp as wp
 
-
 CUDA_RUNTIME_SONAMES = ("libcudart.so.12", "libcudart.so")
 CUDA_STREAM_NON_BLOCKING = 0x01
 CUDA_STREAM_CAPTURE_MODE_RELAXED = 2
@@ -95,9 +94,7 @@ def capture_cuda_graph_relaxed(
     stream_handle = _create_nonblocking_stream()
     fresh_stream = wp.Stream(device, cuda_stream=stream_handle, owner=False)
 
-    ret = _cudart.cudaStreamBeginCapture(
-        ctypes.c_void_p(stream_handle), ctypes.c_int(CUDA_STREAM_CAPTURE_MODE_RELAXED)
-    )
+    ret = _cudart.cudaStreamBeginCapture(ctypes.c_void_p(stream_handle), ctypes.c_int(CUDA_STREAM_CAPTURE_MODE_RELAXED))
     if ret != 0:
         _cudart.cudaStreamDestroy(ctypes.c_void_p(stream_handle))
         raise CudaGraphCaptureError(f"cudaStreamBeginCapture(cudaStreamCaptureModeRelaxed) failed with code {ret}")

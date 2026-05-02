@@ -226,7 +226,9 @@ def test_reset_graph_split_resets_super_and_pva_buffers(sim):
         torch.testing.assert_close(tensors[name][env_mask_torch], torch.zeros_like(tensors[name][env_mask_torch]))
 
     expected_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=tensors["quat_w"].dtype, device=tensors["quat_w"].device)
-    expected_pose = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=tensors["pose_w"].dtype, device=tensors["pose_w"].device)
+    expected_pose = torch.tensor(
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=tensors["pose_w"].dtype, device=tensors["pose_w"].device
+    )
     expected_projected_gravity = torch.tensor(
         [0.0, 0.0, -1.0],
         dtype=tensors["projected_gravity_b"].dtype,

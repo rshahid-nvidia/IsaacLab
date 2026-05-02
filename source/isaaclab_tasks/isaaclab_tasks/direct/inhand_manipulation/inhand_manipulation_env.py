@@ -16,7 +16,7 @@ import warp as wp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
-from isaaclab.envs.cuda_graph import ResetContext
+from isaaclab.envs.cuda_graph import ResetContext, ResetGraphPhase
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
@@ -248,10 +248,9 @@ def _compute_inhand_intermediate_and_dones(
         rot_dist = _rotation_distance_wp(obj_rot, goal_rot[env_id])
         if wp.abs(rot_dist) <= success_tolerance:
             episode_length_buf[env_id] = wp.int64(0)
-        reset_time_outs[env_id] = (
-            episode_length_buf[env_id] >= max_episode_length_minus_one
-            or successes[env_id] >= wp.float32(max_consecutive_success)
-        )
+        reset_time_outs[env_id] = episode_length_buf[env_id] >= max_episode_length_minus_one or successes[
+            env_id
+        ] >= wp.float32(max_consecutive_success)
     else:
         reset_time_outs[env_id] = episode_length_buf[env_id] >= max_episode_length_minus_one
 
@@ -421,7 +420,9 @@ class InHandManipulationEnv(DirectRLEnv):
         if self._inhand_warp_step_enabled:
             self._setup_inhand_warp_step_buffers()
 
-        self._inhand_fused_reset_enabled = self._inhand_warp_step_enabled and not self._get_inhand_fused_reset_blockers()
+        self._inhand_fused_reset_enabled = (
+            self._inhand_warp_step_enabled and not self._get_inhand_fused_reset_blockers()
+        )
         if self._inhand_fused_reset_enabled:
             self._set_joint_pos_target_mask = self.hand.set_joint_position_target_mask
             self._write_obj_root_pose_mask = self.object.write_root_pose_to_sim_mask
@@ -824,8 +825,18 @@ class InHandManipulationEnv(DirectRLEnv):
             ("cur_targets", self.cur_targets, (self.num_envs, self.num_hand_dofs), torch.float32),
             ("hand_dof_targets", self.hand_dof_targets, (self.num_envs, self.num_hand_dofs), torch.float32),
             ("object.default_root_pose", self.object.data.default_root_pose.torch, (self.num_envs, 7), torch.float32),
-            ("hand.default_joint_pos", self.hand.data.default_joint_pos.torch, (self.num_envs, self.num_hand_dofs), torch.float32),
-            ("hand.default_joint_vel", self.hand.data.default_joint_vel.torch, (self.num_envs, self.num_hand_dofs), torch.float32),
+            (
+                "hand.default_joint_pos",
+                self.hand.data.default_joint_pos.torch,
+                (self.num_envs, self.num_hand_dofs),
+                torch.float32,
+            ),
+            (
+                "hand.default_joint_vel",
+                self.hand.data.default_joint_vel.torch,
+                (self.num_envs, self.num_hand_dofs),
+                torch.float32,
+            ),
         )
         for name, tensor, shape, dtype in tensor_specs:
             reason = self._check_inhand_warp_tensor(name, tensor, shape=shape, dtype=dtype)
@@ -850,7 +861,9 @@ class InHandManipulationEnv(DirectRLEnv):
 
         reason = self._check_inhand_fused_reset_compatibility()
         if reason is not None:
-            raise RuntimeError(f"In-hand {context} requires the fused Warp reset path, but it is not compatible: {reason}.")
+            raise RuntimeError(
+                f"In-hand {context} requires the fused Warp reset path, but it is not compatible: {reason}."
+            )
         self._refresh_inhand_fused_reset_buffers()
 
     def _launch_inhand_reset_success_snapshot(self, ctx: ResetContext) -> None:
@@ -1271,36 +1284,46 @@ class InHandManipulationEnv(DirectRLEnv):
             raise ValueError("Fused in-hand reset requires concrete env_ids.")
 
         if use_cuda_graph:
-            replay_stream = self._launch_reset_cuda_graph_phase(
-                "_reset_common_cuda_graph",
-                "common reset",
-                lambda graph_ctx: self._reset_idx_common_graphable(graph_ctx, reset_episode_lengths=False),
-            )
-            if replay_stream is None:
-                return None
-            with wp.ScopedStream(replay_stream, sync_enter=False):
-                ctx, env_ids_from_reset_mask = self._materialize_reset_context_env_ids(ctx)
-                if env_ids_from_reset_mask and len(ctx.env_ids) == 0:
-                    return ctx.env_ids
-                self._reset_idx_common_after_graph(ctx, reset_episode_lengths=False)
-                replay_stream = self._launch_reset_cuda_graph_phase(
-                    "_reset_cuda_graph",
-                    "task reset",
-                    self._launch_inhand_task_reset_graphable,
-                )
-                if replay_stream is None:
-                    return None
-            with wp.ScopedStream(replay_stream, sync_enter=False):
-                replay_stream = self._launch_reset_cuda_graph_phase(
-                    "_reset_apply_cuda_graph",
-                    "apply reset",
-                    self._launch_inhand_reset_to_sim_graphable,
-                    prepare_capture=self._prepare_inhand_reset_to_sim_capture_state,
-                )
-                if replay_stream is None:
-                    return None
-            with wp.ScopedStream(replay_stream, sync_enter=False):
+
+            def after_common_reset(graph_ctx: ResetContext) -> tuple[ResetContext, bool]:
+                graph_ctx, env_ids_from_reset_mask = self._materialize_reset_context_env_ids(graph_ctx)
+                if env_ids_from_reset_mask and len(graph_ctx.env_ids) == 0:
+                    return graph_ctx, False
+                self._reset_idx_common_after_graph(graph_ctx, reset_episode_lengths=False)
+                return graph_ctx, True
+
+            def after_apply_reset(graph_ctx: ResetContext) -> tuple[ResetContext, bool]:
                 self._apply_inhand_reset_to_sim_after_graph()
+                return graph_ctx, True
+
+            phases = (
+                ResetGraphPhase(
+                    graph_attr="_reset_common_cuda_graph",
+                    name="common reset",
+                    launch_fn=lambda graph_ctx: self._reset_idx_common_graphable(
+                        graph_ctx, reset_episode_lengths=False
+                    ),
+                    between_hook=after_common_reset,
+                ),
+                ResetGraphPhase(
+                    graph_attr="_reset_cuda_graph",
+                    name="task reset",
+                    launch_fn=self._launch_inhand_task_reset_graphable,
+                ),
+                ResetGraphPhase(
+                    graph_attr="_reset_apply_cuda_graph",
+                    name="apply reset",
+                    launch_fn=self._launch_inhand_reset_to_sim_graphable,
+                    prepare_capture=self._prepare_inhand_reset_to_sim_capture_state,
+                    between_hook=after_apply_reset,
+                ),
+            )
+            replay_result = self._replay_reset_cuda_graph_phases(ctx, phases)
+            if replay_result is None:
+                return None
+            ctx, replay_completed = replay_result
+            if not replay_completed:
+                return ctx.env_ids
         else:
             self._launch_inhand_reset_success_snapshot(ctx)
             self._reset_idx_common_graphable(ctx, reset_episode_lengths=False)
@@ -1331,9 +1354,7 @@ class InHandManipulationEnv(DirectRLEnv):
         env_ids = self._reset_env_ids_tensor(env_ids)
         env_ids_long = env_ids.to(dtype=torch.long)
 
-        self._last_episode_success[env_ids_long] = (
-            self.successes[env_ids_long] >= self.cfg.success_count_threshold
-        )
+        self._last_episode_success[env_ids_long] = self.successes[env_ids_long] >= self.cfg.success_count_threshold
         self.extras.setdefault("log", {})["Metrics/success_rate"] = (
             self._last_episode_success[env_ids_long].float().mean().item()
         )
@@ -1391,7 +1412,8 @@ class InHandManipulationEnv(DirectRLEnv):
         )
 
         self.goal_rot[env_ids_long] = new_rot
-        self.goal_markers.visualize(self.goal_pos + self.scene.env_origins, self.goal_rot)
+        if self._should_sync_goal_markers():
+            self.goal_markers.visualize(self.goal_pos + self.scene.env_origins, self.goal_rot)
 
         self.reset_goal_buf[env_ids_long] = 0
 

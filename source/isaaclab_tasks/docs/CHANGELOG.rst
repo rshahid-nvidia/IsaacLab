@@ -16,9 +16,9 @@ Added
 Changed
 ^^^^^^^
 
-* In direct in-hand manipulation tasks, fused Newton reset and reward paths now update goal-marker USD transforms only
-  when GUI, RTX sensors, or active visualizers can observe them. Headless non-visual training keeps observations,
-  rewards, dones, and reset state unchanged while avoiding unnecessary marker authoring work.
+* In direct in-hand manipulation tasks, fused Newton and Torch fallback reset/reward paths now update goal-marker USD
+  transforms only when GUI, RTX sensors, or active visualizers can observe them. Headless non-visual training keeps
+  observations, rewards, dones, and reset state unchanged while avoiding unnecessary marker authoring work.
 
 Fixed
 ^^^^^

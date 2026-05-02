@@ -1,6 +1,32 @@
 Changelog
 ---------
 
+4.6.26 (2026-05-02)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added split reset APIs for graphable reset work on assets, sensors, scenes, and wrench composers:
+  ``reset_graphable()``, ``reset_after_graph()``, and ``reset_graph_tensors()``.
+* Added reset/CUDA graph helpers: :class:`~isaaclab.envs.cuda_graph.ResetContext`,
+  :class:`~isaaclab.envs.cuda_graph.ResetGraphPhase`, :class:`~isaaclab.envs.cuda_graph.CudaGraphReplayGuard`,
+  :class:`~isaaclab.envs.cuda_graph.CudaGraphCaptureError`, :class:`~isaaclab.utils.reset.ResetSelection`,
+  and low-level relaxed capture helpers in :mod:`isaaclab.utils.cuda_graph`.
+* Added reusable reset graph orchestration hooks on :class:`~isaaclab.envs.DirectRLEnv`, including
+  ``_reset_idx_from_reset_buf()``, ``_reset_idx_common_graphable()``, ``_reset_idx_common_after_graph()``,
+  ``_configure_reset_cuda_graph()``, ``_capture_reset_cuda_graph_phase()``,
+  ``_launch_reset_cuda_graph_phase()``, ``_replay_reset_cuda_graph_phases()``, and
+  ``_recapture_reset_cuda_graph()``.
+
+Changed
+^^^^^^^
+
+* ``WrenchComposer.reset_graphable()`` now only performs tensor reset work. Python ``_active``/``_dirty`` flag updates
+  are owned by ``reset()`` and ``reset_after_graph()``; callers that invoke ``reset_graphable()`` directly must also run
+  ``reset_after_graph()`` when they need residual Python state to match eager reset semantics.
+
+
 4.6.25 (2026-04-28)
 ~~~~~~~~~~~~~~~~~~~
 

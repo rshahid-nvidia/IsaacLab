@@ -8,13 +8,13 @@
 import pytest
 import torch
 import warp as wp
+from isaaclab_newton.assets import RigidObject
+from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.sim import SimulationCfg, build_simulation_context
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-from isaaclab_newton.assets import RigidObject
-from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 
 
 def _newton_sim_context(device: str):

@@ -11,9 +11,9 @@ import math
 import warnings
 import weakref
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import MISSING
-from typing import Any, Callable, ClassVar
+from typing import Any, ClassVar
 
 import gymnasium as gym
 import numpy as np
@@ -25,6 +25,13 @@ from isaaclab.scene import InteractiveScene
 from isaaclab.sim import SimulationContext
 from isaaclab.sim.utils.stage import use_stage
 from isaaclab.utils.configclass import resolve_cfg_presets
+from isaaclab.utils.cuda_graph import (
+    CudaGraphCaptureError,
+    capture_cuda_graph_relaxed,
+    cuda_runtime_soname,
+    launch_cuda_graph_on_current_torch_stream,
+    relaxed_cuda_graph_capture_available,
+)
 from isaaclab.utils.noise import NoiseModel
 from isaaclab.utils.profiling import nvtx_range_pop, nvtx_range_push
 from isaaclab.utils.seed import configure_seed
@@ -35,8 +42,7 @@ from .common import VecEnvObs, VecEnvStepReturn
 from .cuda_graph import (
     CudaGraphReplayGuard,
     ResetContext,
-    capture_cuda_graph_relaxed,
-    launch_cuda_graph_on_current_torch_stream,
+    ResetGraphPhase,
 )
 from .direct_rl_env_cfg import DirectRLEnvCfg
 from .ui import ViewportCameraController
@@ -793,6 +799,17 @@ class DirectRLEnv(gym.Env):
             self._disable_reset_cuda_graph("; ".join(reasons), log_level=logging.INFO)
             return
 
+        cudart_name = cuda_runtime_soname()
+        if relaxed_cuda_graph_capture_available():
+            logger.info(
+                "%s: relaxed CUDA graph capture available via %s.", self._reset_cuda_graph_path_name, cudart_name
+            )
+        else:
+            logger.warning(
+                "%s: relaxed CUDA graph capture unavailable because cudart could not be loaded.",
+                self._reset_cuda_graph_path_name,
+            )
+
         try:
             self._setup_reset_cuda_graph_buffers()
             self._warmup_reset_cuda_graph()
@@ -853,7 +870,10 @@ class DirectRLEnv(gym.Env):
         if prepare_capture is not None:
             prepare_capture()
         ctx = self._reset_cuda_graph_capture_context()
-        return capture_cuda_graph_relaxed(self.device, lambda: launch_fn(ctx))
+        try:
+            return capture_cuda_graph_relaxed(self.device, lambda: launch_fn(ctx))
+        except CudaGraphCaptureError as exc:
+            raise CudaGraphCaptureError(f"{phase_name} capture failed: {exc}") from exc
 
     def _launch_reset_cuda_graph_phase(
         self,
@@ -868,15 +888,51 @@ class DirectRLEnv(gym.Env):
         graph = getattr(self, graph_attr)
         if graph is None:
             try:
-                graph = self._capture_reset_cuda_graph_phase(
-                    phase_name, launch_fn, prepare_capture=prepare_capture
-                )
-            except Exception as exc:
-                reason = f"{phase_name} capture failed: {exc}"
-                self._disable_reset_cuda_graph(reason)
+                graph = self._capture_reset_cuda_graph_phase(phase_name, launch_fn, prepare_capture=prepare_capture)
+            except CudaGraphCaptureError as exc:
+                self._disable_reset_cuda_graph(str(exc))
                 return None
             setattr(self, graph_attr, graph)
         return launch_cuda_graph_on_current_torch_stream(self.device, graph)
+
+    def _replay_reset_cuda_graph_phases(
+        self, ctx: ResetContext, phases: Sequence[ResetGraphPhase]
+    ) -> tuple[ResetContext, bool] | None:
+        """Replay ordered reset graph phases and run residual hooks on the replay stream.
+
+        Returns:
+            ``None`` when capture/replay had to disable the CUDA graph path, otherwise the final reset context and a
+            boolean indicating whether all phases ran. A ``False`` completion flag means a phase hook intentionally
+            stopped the remaining phases, for example because the reset mask was empty after the common reset phase.
+        """
+
+        replay_stream: wp.Stream | None = None
+        for phase in phases:
+            if replay_stream is None:
+                replay_stream = self._launch_reset_cuda_graph_phase(
+                    phase.graph_attr,
+                    phase.name,
+                    phase.launch_fn,
+                    prepare_capture=phase.prepare_capture,
+                )
+            else:
+                with wp.ScopedStream(replay_stream, sync_enter=False):
+                    replay_stream = self._launch_reset_cuda_graph_phase(
+                        phase.graph_attr,
+                        phase.name,
+                        phase.launch_fn,
+                        prepare_capture=phase.prepare_capture,
+                    )
+            if replay_stream is None:
+                return None
+
+            if phase.between_hook is not None:
+                with wp.ScopedStream(replay_stream, sync_enter=False):
+                    ctx, should_continue = phase.between_hook(ctx)
+                if not should_continue:
+                    return ctx, False
+
+        return ctx, True
 
     def _reset_cuda_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
         """Return tensors whose storage and metadata must remain stable for reset graph replay."""
@@ -1001,9 +1057,7 @@ class DirectRLEnv(gym.Env):
 
         mode = str(getattr(self.cfg, "reset_cuda_graph", "off")).lower()
         if mode not in _RESET_CUDA_GRAPH_MODES:
-            raise ValueError(
-                f"Unsupported reset_cuda_graph={mode!r}; expected one of {_RESET_CUDA_GRAPH_MODES}."
-            )
+            raise ValueError(f"Unsupported reset_cuda_graph={mode!r}; expected one of {_RESET_CUDA_GRAPH_MODES}.")
         return mode
 
     """

@@ -104,9 +104,9 @@ def test_reset_graph_split_resets_super_and_contact_buffers():
             if tensor.dtype == torch.bool:
                 tensor[:] = False
             else:
-                tensor[:] = torch.arange(tensor.numel(), dtype=tensor.dtype, device=tensor.device).reshape(
-                    tensor.shape
-                ) + 1
+                tensor[:] = (
+                    torch.arange(tensor.numel(), dtype=tensor.dtype, device=tensor.device).reshape(tensor.shape) + 1
+                )
 
         kept = {name: tensor[~env_mask_torch].clone() for name, tensor in tensors.items()}
 

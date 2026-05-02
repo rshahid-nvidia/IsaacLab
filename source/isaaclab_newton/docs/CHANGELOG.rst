@@ -1,6 +1,27 @@
 Changelog
 ---------
 
+0.5.26 (2026-05-02)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added Newton split-reset support for graphable reset paths on
+  :class:`~isaaclab_newton.assets.Articulation`, :class:`~isaaclab_newton.assets.RigidObject`, and
+  :class:`~isaaclab_newton.assets.RigidObjectCollection`, including ``reset_graphable()``,
+  ``reset_after_graph()``, and ``reset_graph_tensors()``.
+* Added mask-based writer hooks used by graph reset replay for Newton articulation and rigid-object state writes.
+* Added split-reset overrides for Newton contact, IMU, and PVA sensor state.
+
+Changed
+^^^^^^^
+
+* Newton ``Articulation.reset()`` and ``RigidObject.reset()`` now apply one explicit selector rule: when ``env_mask`` is
+  provided, it is the source of truth and wins over ``env_ids``. Callers that pass both selectors should drop
+  ``env_mask`` if they intend ``env_ids`` to drive actuator or wrench reset.
+
+
 0.5.25 (2026-04-28)
 ~~~~~~~~~~~~~~~~~~~
 

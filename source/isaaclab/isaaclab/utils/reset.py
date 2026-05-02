@@ -13,7 +13,6 @@ from dataclasses import dataclass
 import torch
 import warp as wp
 
-
 ResetEnvIds = Sequence[int] | torch.Tensor | wp.array | slice | None
 
 

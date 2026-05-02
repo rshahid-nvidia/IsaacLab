@@ -7,15 +7,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 import warp as wp
 
-from isaaclab.utils.cuda_graph import capture_cuda_graph_relaxed, launch_cuda_graph_on_current_torch_stream
+from isaaclab.utils.cuda_graph import CudaGraphCaptureError
 from isaaclab.utils.reset import ResetSelection
+
+__all__ = [
+    "CudaGraphCaptureError",
+    "CudaGraphReplayGuard",
+    "ResetContext",
+    "ResetGraphPhase",
+]
 
 
 @dataclass(frozen=True)
@@ -31,10 +38,25 @@ class ResetContext:
 
         return ResetSelection(env_ids=self.env_ids, env_mask=self.reset_mask_wp)
 
-    def with_env_ids(self, env_ids: torch.Tensor) -> "ResetContext":
+    def with_env_ids(self, env_ids: torch.Tensor) -> ResetContext:
         """Return a copy with concrete environment ids materialized."""
 
         return type(self)(env_ids=env_ids, reset_mask_wp=self.reset_mask_wp)
+
+
+@dataclass(frozen=True)
+class ResetGraphPhase:
+    """One ordered CUDA graph phase in a split reset replay sequence.
+
+    ``between_hook`` runs on the replay stream after this phase launches and before the next phase launches. It returns
+    the possibly-updated reset context plus whether replay should continue to later phases.
+    """
+
+    graph_attr: str
+    name: str
+    launch_fn: Callable[[ResetContext], None]
+    prepare_capture: Callable[[], None] | None = None
+    between_hook: Callable[[ResetContext], tuple[ResetContext, bool]] | None = None
 
 
 @dataclass(frozen=True)
@@ -48,7 +70,7 @@ class CudaGraphTensorSignature:
     device: str
 
     @classmethod
-    def capture(cls, tensor: torch.Tensor) -> "CudaGraphTensorSignature":
+    def capture(cls, tensor: torch.Tensor) -> CudaGraphTensorSignature:
         """Capture the replay-relevant identity and metadata of ``tensor``."""
 
         return cls(
@@ -81,7 +103,7 @@ class CudaGraphWarpArraySignature:
     device: str
 
     @classmethod
-    def capture(cls, array: wp.array) -> "CudaGraphWarpArraySignature":
+    def capture(cls, array: wp.array) -> CudaGraphWarpArraySignature:
         """Capture the replay-relevant identity and metadata of ``array``."""
 
         return cls(
