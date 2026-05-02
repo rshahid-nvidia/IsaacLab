@@ -66,6 +66,20 @@ class _GraphAwareResetEntity:
         return {"tensor": self.tensor}
 
 
+class _UpdateEntity:
+    def __init__(self, log, name):
+        self.log = log
+        self.name = name
+
+    def update(self, dt):
+        self.log.append((self.name, dt))
+
+
+class _UpdateSensor(_UpdateEntity):
+    def update(self, dt, force_recompute=False):
+        self.log.append((self.name, dt, force_recompute))
+
+
 class _DefaultGraphAsset(AssetBase):
     def __init__(self):
         self.log = []
@@ -410,7 +424,6 @@ def test_scene_reset_graph_tensors_prefixes_entity_names():
 
     assert scene.reset_graph_tensors() == {"rigid_object.cube.tensor": graph_aware.tensor}
 
-
 def test_sensor_base_reset_graph_tensors_reports_base_timestamp_buffers():
     sensor = object.__new__(_DefaultGraphSensor)
     sensor._initialize_handle = None
@@ -426,6 +439,75 @@ def test_sensor_base_reset_graph_tensors_reports_base_timestamp_buffers():
         "timestamp": sensor._timestamp,
         "timestamp_last_update": sensor._timestamp_last_update,
     }
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+def test_sensor_base_resolve_indices_accepts_warp_array_ids(device):
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        pytest.skip("CUDA is required for CUDA Warp id coverage.")
+
+    sensor = object.__new__(_DefaultGraphSensor)
+    sensor._initialize_handle = None
+    sensor._invalidate_initialize_handle = None
+    sensor._prim_deletion_handle = None
+    sensor._debug_vis_handle = None
+    sensor._num_envs = 4
+    sensor._device = device
+    sensor._ALL_ENV_MASK = wp.ones(4, dtype=wp.bool, device=device)
+    sensor._reset_mask = wp.zeros(4, dtype=wp.bool, device=device)
+    sensor._reset_mask_torch = wp.to_torch(sensor._reset_mask)
+
+    env_ids = wp.array([0, 2], dtype=wp.int32, device=device)
+    mask = sensor._resolve_indices_and_mask(env_ids=env_ids)
+
+    torch.testing.assert_close(
+        wp.to_torch(mask),
+        torch.tensor([True, False, True, False], dtype=torch.bool, device=device),
+    )
+
+
+def test_sensor_default_split_reset_has_no_residual_base_reset():
+    sensor = object.__new__(_DefaultGraphSensor)
+    sensor._initialize_handle = None
+    sensor._invalidate_initialize_handle = None
+    sensor._prim_deletion_handle = None
+    sensor._debug_vis_handle = None
+    calls = []
+
+    def _record_reset_base_buffers(env_ids=None, env_mask=None):
+        calls.append((env_ids, env_mask))
+        return env_mask
+
+    sensor._reset_base_buffers = _record_reset_base_buffers
+    env_ids = torch.tensor([0, 2], dtype=torch.int32)
+    env_mask = object()
+
+    sensor.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+    sensor.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    assert calls == [(env_ids, env_mask)]
+
+
+def test_sensor_legacy_reset_override_still_runs_after_graph_fallback():
+    class _LegacyResetSensor(_DefaultGraphSensor):
+        def reset(self, env_ids=None, env_mask=None):
+            calls.append((env_ids, env_mask))
+
+    sensor = object.__new__(_LegacyResetSensor)
+    sensor._initialize_handle = None
+    sensor._invalidate_initialize_handle = None
+    sensor._prim_deletion_handle = None
+    sensor._debug_vis_handle = None
+    calls = []
+
+    sensor._reset_base_buffers = lambda env_ids=None, env_mask=None: env_mask
+    env_ids = torch.tensor([0, 2], dtype=torch.int32)
+    env_mask = object()
+
+    sensor.reset_graphable(env_ids=env_ids, env_mask=env_mask)
+    sensor.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
+    assert calls == [(env_ids, env_mask)]
 
 
 def test_asset_default_graph_fallback_requires_env_ids_for_mask_reset():

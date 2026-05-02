@@ -592,6 +592,38 @@ class TestArticulationReset:
         assert not isinstance(calls[0], slice)
         torch.testing.assert_close(calls[0], torch.tensor([2], dtype=torch.long, device=device))
 
+    @pytest.mark.skipif("newton" not in BACKENDS, reason="Newton backend is not available.")
+    def test_newton_full_reset_uses_indexed_wrench_reset_to_preserve_active_flags(self):
+        art, _ = create_newton_articulation(num_instances=4, num_joints=2, num_bodies=2, device="cpu")
+        actuator_calls = []
+        composer_calls = []
+
+        class _FakeActuator:
+            def reset(self, env_ids):
+                actuator_calls.append(env_ids)
+
+        class _FakeComposer:
+            def reset_graphable(self, env_ids=None, env_mask=None):
+                composer_calls.append(("graphable", env_ids, env_mask))
+
+            def reset_after_graph(self, env_ids=None, env_mask=None):
+                composer_calls.append(("after_graph", env_ids, env_mask))
+
+        art.actuators = {"fake": _FakeActuator()}
+        art._instantaneous_wrench_composer = _FakeComposer()
+        art._permanent_wrench_composer = _FakeComposer()
+
+        art.reset()
+
+        assert len(actuator_calls) == 1
+        assert isinstance(actuator_calls[0], slice)
+        assert actuator_calls[0] == slice(None)
+        assert len(composer_calls) == 4
+        for _, env_ids, env_mask in composer_calls:
+            assert isinstance(env_ids, slice)
+            assert env_ids == slice(None)
+            assert env_mask is None
+
 
 class TestArticulationIndexResolution:
     """Test backend-specific index resolution helpers."""

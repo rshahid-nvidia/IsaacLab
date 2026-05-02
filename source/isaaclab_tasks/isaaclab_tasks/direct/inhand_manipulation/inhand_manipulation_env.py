@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 import warp as wp
 
@@ -22,11 +23,17 @@ from isaaclab.envs.cuda_graph import (
 )
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import quat_conjugate, quat_mul, saturate
+from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
 if TYPE_CHECKING:
     from isaaclab_tasks.direct.allegro_hand.allegro_hand_env_cfg import AllegroHandEnvCfg
     from isaaclab_tasks.direct.shadow_hand.shadow_hand_env_cfg import ShadowHandEnvCfg
+
+
+    if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
+
+
+    if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
 
 
 @wp.func
@@ -404,39 +411,65 @@ class InHandManipulationEnv(DirectRLEnv):
         self.y_unit_tensor = torch.tensor([0, 1, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.z_unit_tensor = torch.tensor([0, 0, 1], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
 
-        # bind backend-optimal joint target method (Newton prefers mask-based, PhysX prefers indexed)
-        use_mask = "newton" in self.sim.physics_manager.__name__.lower()
-        if use_mask:
+        # bind backend-optimal write methods for the semantic Torch fallback path
+        self._is_newton_backend = "newton" in self.sim.physics_manager.__name__.lower()
+        if self._is_newton_backend:
             self._set_joint_pos_target = self.hand.set_joint_position_target
+            self._write_obj_root_pose = self.object.write_root_pose_to_sim
+            self._write_obj_root_vel = self.object.write_root_velocity_to_sim
+            self._write_hand_joint_pos = self.hand.write_joint_position_to_sim
+            self._write_hand_joint_vel = self.hand.write_joint_velocity_to_sim
         else:
             self._set_joint_pos_target = self.hand.set_joint_position_target_index
-        self._set_joint_pos_target_mask = self.hand.set_joint_position_target_mask
-        self._write_obj_root_pose_mask = self.object.write_root_pose_to_sim_mask
-        self._write_obj_root_vel_mask = self.object.write_root_velocity_to_sim_mask
-        self._write_hand_joint_pos_mask = self.hand.write_joint_position_to_sim_mask
-        self._write_hand_joint_vel_mask = self.hand.write_joint_velocity_to_sim_mask
+            self._write_obj_root_pose = self.object.write_root_pose_to_sim_index
+            self._write_obj_root_vel = self.object.write_root_velocity_to_sim_index
+            self._write_hand_joint_pos = self.hand.write_joint_position_to_sim_index
+            self._write_hand_joint_vel = self.hand.write_joint_velocity_to_sim_index
 
-        if not self._inhand_warp_state_buffers_available():
-            raise RuntimeError(
-                "In-hand manipulation requires the fused Warp step path; "
-                "required Warp state buffers are not available."
-            )
-        self._setup_inhand_warp_step_buffers()
+        self._inhand_warp_step_enabled = self._is_newton_backend and self._inhand_warp_state_buffers_available()
+        if self._inhand_warp_step_enabled:
+            self._setup_inhand_warp_step_buffers()
 
-        fused_reset_blockers = self._get_inhand_fused_reset_blockers()
-        if fused_reset_blockers:
-            raise RuntimeError(
-                "In-hand manipulation requires the fused Warp reset path; "
-                f"{'; '.join(fused_reset_blockers)}."
-            )
-        self._set_joint_pos_target_mask_after_graph = self.hand.set_joint_position_target_mask_after_graph
-        self._write_obj_root_pose_mask_after_graph = self.object.write_root_pose_to_sim_mask_after_graph
-        self._write_obj_root_vel_mask_after_graph = self.object.write_root_velocity_to_sim_mask_after_graph
-        self._write_hand_joint_pos_mask_after_graph = self.hand.write_joint_position_to_sim_mask_after_graph
-        self._write_hand_joint_vel_mask_after_graph = self.hand.write_joint_velocity_to_sim_mask_after_graph
-        self._setup_inhand_fused_reset_buffers()
+        self._inhand_fused_reset_enabled = self._inhand_warp_step_enabled and not self._get_inhand_fused_reset_blockers()
+        if self._inhand_fused_reset_enabled:
+            self._set_joint_pos_target_mask = self.hand.set_joint_position_target_mask
+            self._write_obj_root_pose_mask = self.object.write_root_pose_to_sim_mask
+            self._write_obj_root_vel_mask = self.object.write_root_velocity_to_sim_mask
+            self._write_hand_joint_pos_mask = self.hand.write_joint_position_to_sim_mask
+            self._write_hand_joint_vel_mask = self.hand.write_joint_velocity_to_sim_mask
+            self._set_joint_pos_target_mask_after_graph = self.hand.set_joint_position_target_mask_after_graph
+            self._write_obj_root_pose_mask_after_graph = self.object.write_root_pose_to_sim_mask_after_graph
+            self._write_obj_root_vel_mask_after_graph = self.object.write_root_velocity_to_sim_mask_after_graph
+            self._write_hand_joint_pos_mask_after_graph = self.hand.write_joint_position_to_sim_mask_after_graph
+            self._write_hand_joint_vel_mask_after_graph = self.hand.write_joint_velocity_to_sim_mask_after_graph
+            self._setup_inhand_fused_reset_buffers()
 
         self._configure_reset_cuda_graph(path_name="In-hand reset CUDA graph path")
+
+    def seed(self, seed: int = -1) -> int:
+        """Set global RNG state and reseed in-hand Warp RNG buffers when they exist."""
+
+        seed = DirectRLEnv.seed(seed)
+        self._reseed_inhand_warp_rng(seed)
+        return seed
+
+    def _reseed_inhand_warp_rng(self, seed: int) -> None:
+        """Reinitialize persistent Warp RNG states that replaced Torch reset sampling."""
+
+        if hasattr(self, "_goal_reset_rng_state_wp"):
+            wp.launch(
+                _initialize_reset_rng,
+                dim=self.num_envs,
+                inputs=[int(seed) + 104729, self._goal_reset_rng_state_wp],
+                device=self.device,
+            )
+        if hasattr(self, "_reset_rng_state_wp"):
+            wp.launch(
+                _initialize_reset_rng,
+                dim=self.num_envs,
+                inputs=[int(seed), self._reset_rng_state_wp],
+                device=self.device,
+            )
 
     def _inhand_warp_state_buffers_available(self) -> bool:
         try:
@@ -477,13 +510,7 @@ class InHandManipulationEnv(DirectRLEnv):
         self._x_unit_vec_wp = wp.vec3f(1.0, 0.0, 0.0)
         self._y_unit_vec_wp = wp.vec3f(0.0, 1.0, 0.0)
         self._goal_reset_rng_state_wp = wp.zeros(self.num_envs, dtype=wp.uint32, device=self.device)
-        goal_reset_seed = 0 if self.cfg.seed is None else int(self.cfg.seed) + 104729
-        wp.launch(
-            _initialize_reset_rng,
-            dim=self.num_envs,
-            inputs=[goal_reset_seed, self._goal_reset_rng_state_wp],
-            device=self.device,
-        )
+        self._reseed_inhand_warp_rng(0 if self.cfg.seed is None else int(self.cfg.seed))
 
         self._graph_fingertip_pos_wp = wp.zeros(
             (self.num_envs, self.num_fingertips), dtype=wp.vec3f, device=self.device
@@ -617,13 +644,7 @@ class InHandManipulationEnv(DirectRLEnv):
         self._hand_dof_targets_wp = wp.from_torch(self.hand_dof_targets, dtype=wp.float32)
 
         self._reset_rng_state_wp = wp.zeros(self.num_envs, dtype=wp.uint32, device=self.device)
-        reset_seed = 0 if self.cfg.seed is None else int(self.cfg.seed)
-        wp.launch(
-            _initialize_reset_rng,
-            dim=self.num_envs,
-            inputs=[reset_seed, self._reset_rng_state_wp],
-            device=self.device,
-        )
+        self._reseed_inhand_warp_rng(0 if self.cfg.seed is None else int(self.cfg.seed))
 
         self._reset_empty_mask_wp = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
         self._reset_count_wp = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -653,6 +674,8 @@ class InHandManipulationEnv(DirectRLEnv):
         self._graph_object_angvel_torch = wp.to_torch(self._graph_object_angvel_wp)
 
     def _setup_reset_cuda_graph_buffers(self) -> None:
+        if not self._inhand_fused_reset_enabled:
+            raise RuntimeError("fused in-hand reset path is not enabled")
         self._setup_inhand_fused_reset_buffers()
         self._require_inhand_warp_step("reset CUDA graph")
         self._require_inhand_fused_reset("reset CUDA graph")
@@ -762,9 +785,11 @@ class InHandManipulationEnv(DirectRLEnv):
 
     def _get_reset_cuda_graph_blockers(self) -> list[str]:
         reasons = super()._get_reset_cuda_graph_blockers()
-        reasons.extend(self._get_inhand_fused_reset_blockers())
-        if "newton" not in self.sim.physics_manager.__name__.lower():
+        if not self._is_newton_backend:
             reasons.append("physics backend is not Newton")
+        if not self._inhand_warp_step_enabled:
+            reasons.append("fused Warp step path is not enabled")
+        reasons.extend(self._get_inhand_fused_reset_blockers())
         return reasons
 
     def _get_inhand_fused_reset_blockers(self) -> list[str]:
@@ -1076,6 +1101,9 @@ class InHandManipulationEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
+        if not self._inhand_warp_step_enabled:
+            return self._get_rewards_torch()
+
         self._require_inhand_warp_step("reward computation")
         action_reason = self._check_inhand_warp_tensor(
             "actions", self.actions, shape=(self.num_envs, len(self.actuated_dof_indices)), dtype=torch.float32
@@ -1138,10 +1166,51 @@ class InHandManipulationEnv(DirectRLEnv):
 
         if "log" not in self.extras:
             self.extras["log"] = dict()
-        self.extras["log"]["consecutive_successes"] = self.consecutive_successes[0]
+        self.extras["log"]["consecutive_successes"] = self.consecutive_successes.mean()
         return self.reward_buf
 
+    def _get_rewards_torch(self) -> torch.Tensor:
+        (
+            total_reward,
+            self.reset_goal_buf,
+            self.successes[:],
+            self.consecutive_successes[:],
+        ) = compute_rewards(
+            self.reset_buf,
+            self.reset_goal_buf,
+            self.successes,
+            self.consecutive_successes,
+            self.max_episode_length,
+            self.object_pos,
+            self.object_rot,
+            self.in_hand_pos,
+            self.goal_rot,
+            self.cfg.dist_reward_scale,
+            self.cfg.rot_reward_scale,
+            self.cfg.rot_eps,
+            self.actions,
+            self.cfg.action_penalty_scale,
+            self.cfg.success_tolerance,
+            self.cfg.reach_goal_bonus,
+            self.cfg.fall_dist,
+            self.cfg.fall_penalty,
+            self.cfg.av_factor,
+        )
+
+        if "log" not in self.extras:
+            self.extras["log"] = dict()
+        self.extras["log"]["consecutive_successes"] = self.consecutive_successes.mean()
+
+        goal_env_ids = self.reset_goal_buf.nonzero(as_tuple=False).squeeze(-1)
+        if len(goal_env_ids) > 0:
+            self._reset_target_pose(goal_env_ids)
+
+        return total_reward
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self._inhand_warp_step_enabled:
+            return self._get_dones_torch()
+
         self._require_inhand_warp_step("done computation")
         wp.launch(
             _compute_inhand_intermediate_and_dones,
@@ -1178,7 +1247,31 @@ class InHandManipulationEnv(DirectRLEnv):
         self._publish_inhand_intermediate_values()
         return self.reset_terminated, self.reset_time_outs
 
+    def _get_dones_torch(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self._compute_intermediate_values()
+
+        goal_dist = torch.linalg.norm(self.object_pos - self.in_hand_pos, ord=2, dim=-1)
+        out_of_reach = goal_dist >= self.cfg.fall_dist
+
+        if self.cfg.max_consecutive_success > 0:
+            rot_dist = rotation_distance(self.object_rot, self.goal_rot)
+            self.episode_length_buf[:] = torch.where(
+                torch.abs(rot_dist) <= self.cfg.success_tolerance,
+                torch.zeros_like(self.episode_length_buf),
+                self.episode_length_buf,
+            )
+            max_success_reached = self.successes >= self.cfg.max_consecutive_success
+
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        if self.cfg.max_consecutive_success > 0:
+            time_out = time_out | max_success_reached
+        return out_of_reach, time_out
+
     def _reset_idx(self, env_ids: Sequence[int]):
+        if not self._inhand_fused_reset_enabled:
+            self._reset_idx_torch(env_ids)
+            return
+
         self._require_inhand_warp_step("reset")
         self._require_inhand_fused_reset("reset")
         env_ids = self._reset_env_ids_tensor(env_ids)
@@ -1265,6 +1358,76 @@ class InHandManipulationEnv(DirectRLEnv):
             self.extras.setdefault("log", {})["Metrics/success_rate"] = success_count / float(reset_count)
         if self._should_sync_goal_markers() and reset_count > 0:
             self.goal_markers.visualize(self.goal_pos + self.scene.env_origins, self.goal_rot)
+
+    def _reset_idx_torch(self, env_ids: Sequence[int]) -> None:
+        """Fallback reset path preserving the pre-fused in-hand semantics."""
+
+        env_ids = self._reset_env_ids_tensor(env_ids)
+        env_ids_long = env_ids.to(dtype=torch.long)
+
+        self._last_episode_success[env_ids_long] = (
+            self.successes[env_ids_long] >= self.cfg.success_count_threshold
+        )
+        self.extras.setdefault("log", {})["Metrics/success_rate"] = (
+            self._last_episode_success[env_ids_long].float().mean().item()
+        )
+
+        super()._reset_idx(env_ids)
+
+        self._reset_target_pose(env_ids)
+
+        object_default_pose = self.object.data.default_root_pose.torch.clone()[env_ids_long]
+        object_default_vel = self.object.data.default_root_vel.torch.clone()[env_ids_long]
+        pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
+        object_default_pose[:, 0:3] = (
+            object_default_pose[:, 0:3]
+            + self.cfg.reset_position_noise * pos_noise
+            + self.scene.env_origins[env_ids_long]
+        )
+
+        rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
+        object_default_pose[:, 3:7] = randomize_rotation(
+            rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids_long], self.y_unit_tensor[env_ids_long]
+        )
+
+        object_default_vel[:] = 0.0
+        self._write_obj_root_pose(root_pose=object_default_pose, env_ids=env_ids)
+        self._write_obj_root_vel(root_velocity=object_default_vel, env_ids=env_ids)
+
+        delta_max = self.hand_dof_upper_limits[env_ids_long] - self.hand.data.default_joint_pos.torch[env_ids_long]
+        delta_min = self.hand_dof_lower_limits[env_ids_long] - self.hand.data.default_joint_pos.torch[env_ids_long]
+
+        dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+        rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
+        dof_pos = self.hand.data.default_joint_pos.torch[env_ids_long] + self.cfg.reset_dof_pos_noise * rand_delta
+
+        dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
+        dof_vel = self.hand.data.default_joint_vel.torch[env_ids_long] + self.cfg.reset_dof_vel_noise * dof_vel_noise
+
+        self.prev_targets[env_ids_long] = dof_pos
+        self.cur_targets[env_ids_long] = dof_pos
+        self.hand_dof_targets[env_ids_long] = dof_pos
+
+        self._set_joint_pos_target(target=dof_pos, env_ids=env_ids)
+        self._write_hand_joint_pos(position=dof_pos, env_ids=env_ids)
+        self._write_hand_joint_vel(velocity=dof_vel, env_ids=env_ids)
+
+        self.successes[env_ids_long] = 0
+        self._compute_intermediate_values()
+
+    def _reset_target_pose(self, env_ids: Sequence[int]) -> None:
+        env_ids = self._reset_env_ids_tensor(env_ids)
+        env_ids_long = env_ids.to(dtype=torch.long)
+
+        rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
+        new_rot = randomize_rotation(
+            rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids_long], self.y_unit_tensor[env_ids_long]
+        )
+
+        self.goal_rot[env_ids_long] = new_rot
+        self.goal_markers.visualize(self.goal_pos + self.scene.env_origins, self.goal_rot)
+
+        self.reset_goal_buf[env_ids_long] = 0
 
     def _compute_intermediate_values(self):
         # data for hand
@@ -1365,3 +1528,63 @@ def scale(x, lower, upper):
 @torch.jit.script
 def unscale(x, lower, upper):
     return (2.0 * x - upper - lower) / (upper - lower)
+
+
+@torch.jit.script
+def randomize_rotation(rand0, rand1, x_unit_tensor, y_unit_tensor):
+    return quat_mul(
+        quat_from_angle_axis(rand0 * np.pi, x_unit_tensor), quat_from_angle_axis(rand1 * np.pi, y_unit_tensor)
+    )
+
+
+@torch.jit.script
+def rotation_distance(object_rot, target_rot):
+    quat_diff = quat_mul(object_rot, quat_conjugate(target_rot))
+    return 2.0 * torch.asin(torch.clamp(torch.linalg.norm(quat_diff[:, 0:3], ord=2, dim=-1), max=1.0))
+
+
+@torch.jit.script
+def compute_rewards(
+    reset_buf: torch.Tensor,
+    reset_goal_buf: torch.Tensor,
+    successes: torch.Tensor,
+    consecutive_successes: torch.Tensor,
+    max_episode_length: float,
+    object_pos: torch.Tensor,
+    object_rot: torch.Tensor,
+    target_pos: torch.Tensor,
+    target_rot: torch.Tensor,
+    dist_reward_scale: float,
+    rot_reward_scale: float,
+    rot_eps: float,
+    actions: torch.Tensor,
+    action_penalty_scale: float,
+    success_tolerance: float,
+    reach_goal_bonus: float,
+    fall_dist: float,
+    fall_penalty: float,
+    av_factor: float,
+):
+    goal_dist = torch.linalg.norm(object_pos - target_pos, ord=2, dim=-1)
+    rot_dist = rotation_distance(object_rot, target_rot)
+
+    dist_rew = goal_dist * dist_reward_scale
+    rot_rew = 1.0 / (torch.abs(rot_dist) + rot_eps) * rot_reward_scale
+    action_penalty = torch.sum(actions**2, dim=-1)
+    reward = dist_rew + rot_rew + action_penalty * action_penalty_scale
+
+    goal_resets = torch.where(torch.abs(rot_dist) <= success_tolerance, torch.ones_like(reset_goal_buf), reset_goal_buf)
+    successes = successes + goal_resets
+    reward = torch.where(goal_resets == 1, reward + reach_goal_bonus, reward)
+    reward = torch.where(goal_dist >= fall_dist, reward + fall_penalty, reward)
+
+    resets = torch.where(goal_dist >= fall_dist, torch.ones_like(reset_buf), reset_buf)
+    num_resets = torch.sum(resets)
+    finished_cons_successes = torch.sum(successes * resets.float())
+    cons_successes = torch.where(
+        num_resets > 0,
+        av_factor * finished_cons_successes / num_resets + (1.0 - av_factor) * consecutive_successes,
+        consecutive_successes,
+    )
+
+    return reward, goal_resets, successes, cons_successes

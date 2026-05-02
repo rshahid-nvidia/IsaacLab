@@ -234,9 +234,10 @@ class Articulation(BaseArticulation):
             env_ids: Environment indices. If None, then all indices are used.
             env_mask: Environment mask. If None, then all the instances are updated. Shape is (num_instances,).
         """
-        self._reset_actuators(env_ids=env_ids, env_mask=env_mask)
-        self.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-        self._reset_wrench_composer_after_graph(env_ids=env_ids, env_mask=env_mask)
+        reset_env_ids = slice(None) if env_ids is None and env_mask is None else env_ids
+        self._reset_actuators(env_ids=reset_env_ids, env_mask=env_mask)
+        self.reset_graphable(env_ids=reset_env_ids, env_mask=env_mask)
+        self._reset_wrench_composer_after_graph(env_ids=reset_env_ids, env_mask=env_mask)
 
     def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
         """Launch graph-capturable reset work."""

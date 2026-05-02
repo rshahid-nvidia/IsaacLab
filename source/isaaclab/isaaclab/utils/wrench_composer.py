@@ -559,6 +559,20 @@ class WrenchComposer:
             env_ids: Environment indices. Defaults to None (all environments).
             env_mask: Environment mask. Defaults to None (all environments).
         """
+        full_reset = self._reset_tensors(env_ids=env_ids, env_mask=env_mask)
+        if full_reset:
+            self._active = False
+            self._dirty = False
+        else:
+            self._dirty = True
+
+    def _reset_tensors(
+        self,
+        env_ids: wp.array | torch.Tensor | Sequence[int] | slice | None = None,
+        env_mask: wp.array | None = None,
+    ) -> bool:
+        """Reset tensor buffers and return whether this was a full composer reset."""
+
         if env_ids is None and env_mask is None:
             # Full reset: zero all 7 buffers
             self._global_force_w.zero_()
@@ -568,8 +582,7 @@ class WrenchComposer:
             self._local_torque_b.zero_()
             self._out_force_b.zero_()
             self._out_torque_b.zero_()
-            self._active = False
-            self._dirty = False
+            return True
         elif env_mask is not None:
             wp.launch(
                 reset_wrench_composer_mask,
@@ -586,10 +599,9 @@ class WrenchComposer:
                 ],
                 device=self.device,
             )
-            self._dirty = True
         else:
             # Partial reset via index
-            if env_ids is None or env_ids == slice(None):
+            if env_ids is None or (isinstance(env_ids, slice) and env_ids == slice(None)):
                 env_ids = self._ALL_ENV_INDICES
             elif isinstance(env_ids, list):
                 env_ids = wp.array(env_ids, dtype=wp.int32, device=self.device)
@@ -611,7 +623,7 @@ class WrenchComposer:
                 ],
                 device=self.device,
             )
-            self._dirty = True
+        return False
 
     def reset_graphable(
         self,
@@ -624,7 +636,7 @@ class WrenchComposer:
         and call :meth:`reset_after_graph` afterwards to restore Python-side flags that replay does not execute.
         """
 
-        self.reset(env_ids=env_ids, env_mask=env_mask)
+        self._reset_tensors(env_ids=env_ids, env_mask=env_mask)
 
     def reset_after_graph(
         self,

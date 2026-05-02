@@ -462,7 +462,8 @@ class InteractiveScene:
             env_ids: The indices of the environments to reset.
                 Defaults to None (all instances).
             env_mask: A boolean Warp array indicating which environments to reset. If provided, graph-aware entities use
-                it for mask-native reset work. Defaults to None.
+                it for mask-native reset work. Defaults to None. When using a mask with mixed entity support, also pass
+                ``env_ids`` so entities that only implement indexed reset can safely run their residual fallback.
         """
 
         if env_mask is None:

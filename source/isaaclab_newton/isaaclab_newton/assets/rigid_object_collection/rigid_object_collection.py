@@ -181,7 +181,7 @@ class RigidObjectCollection(BaseRigidObjectCollection):
     ) -> None:
         """Launch graph-capturable reset work."""
 
-        if env_ids is None:
+        if env_ids is None and env_mask is None:
             env_ids = self._ALL_ENV_INDICES
         self._instantaneous_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         self._permanent_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)

@@ -114,6 +114,25 @@ def _make_newton_cfg(task: str, num_envs: int = 8, presets: str = "newton"):
     return cfg
 
 
+def _make_default_cfg(task: str, num_envs: int = 2):
+    old_argv = sys.argv.copy()
+    try:
+        sys.argv = [sys.argv[0]]
+        cfg, _ = resolve_task_config(task, None)
+    finally:
+        sys.argv = old_argv
+
+    cfg.scene.num_envs = num_envs
+    cfg.sim.device = "cuda:0"
+    cfg.seed = 13
+    cfg.reset_cuda_graph = "off"
+    cfg.episode_length_s = 0.04
+    cfg.reset_position_noise = 0.0
+    cfg.reset_dof_pos_noise = 0.0
+    cfg.reset_dof_vel_noise = 0.0
+    return cfg
+
+
 def _assert_graph_reset_to_default_state(gym_env, obs, reward, time_outs, extras, expected_success_rate: float):
     env = gym_env.unwrapped
 
@@ -504,6 +523,100 @@ def test_inhand_warp_core_kernels_run_on_cpu():
     assert torch.isfinite(reward).all()
     assert int(wp.to_torch(goal_reset_count_wp)[0].item()) >= 1
     assert not reset_goal_buf.any()
+
+
+@pytest.mark.parametrize("task", [_ALLEGRO_TASK, _SHADOW_TASK])
+def test_default_physx_inhand_task_constructs_resets_and_steps(task: str):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the public in-hand task smoke test.")
+
+    cfg = _make_default_cfg(task, num_envs=2)
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    if needs_kit and not has_kit():
+        pytest.skip("Default PhysX in-hand tasks require an active Kit app for this smoke test.")
+
+    with launch_simulation(cfg, launcher_args):
+        gym_env = gym.make(task, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            assert not env._inhand_warp_step_enabled
+            assert not env._inhand_fused_reset_enabled
+            assert not env._reset_cuda_graph_enabled
+
+            obs, extras = gym_env.reset()
+            obs, reward, terminated, time_outs, extras = gym_env.step(_zero_actions(env))
+
+            assert torch.isfinite(obs["policy"]).all()
+            assert torch.isfinite(reward).all()
+            assert terminated.shape == (env.num_envs,)
+            assert time_outs.shape == (env.num_envs,)
+        finally:
+            gym_env.close()
+
+
+def test_inhand_reset_seed_reseeds_reset_and_goal_warp_rngs():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the in-hand fused Warp reset path.")
+
+    cfg = _make_newton_cfg(_ALLEGRO_TASK, num_envs=4)
+    cfg.reset_cuda_graph = "off"
+    cfg.episode_length_s = 10.0
+    cfg.reset_position_noise = 0.03
+    cfg.reset_dof_pos_noise = 0.25
+    cfg.reset_dof_vel_noise = 0.1
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    def sample_reset_and_goal(gym_env, seed: int):
+        env = gym_env.unwrapped
+        gym_env.reset(seed=seed)
+        torch.cuda.synchronize()
+
+        reset_state = {
+            "goal_rot_after_reset": env.goal_rot.clone(),
+            "object_pose_after_reset": env.object.data.root_link_pose_w.torch.clone(),
+            "joint_pos_after_reset": env.hand.data.joint_pos.torch.clone(),
+            "reset_rng_state": wp.to_torch(env._reset_rng_state_wp).clone(),
+            "goal_rng_state_before_goal_reset": wp.to_torch(env._goal_reset_rng_state_wp).clone(),
+        }
+
+        env._graph_object_pos_torch[:] = env.in_hand_pos
+        env._graph_object_rot_torch[:] = env.goal_rot
+        env.reset_goal_buf[:] = True
+        env.reset_buf.zero_()
+        env.actions = _zero_actions(env)
+        env._get_rewards()
+        torch.cuda.synchronize()
+
+        reset_state["goal_rot_after_reward_goal_reset"] = env.goal_rot.clone()
+        reset_state["goal_rng_state_after_goal_reset"] = wp.to_torch(env._goal_reset_rng_state_wp).clone()
+        return reset_state
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_ALLEGRO_TASK, cfg=cfg)
+
+        try:
+            first = sample_reset_and_goal(gym_env, seed=123)
+            second = sample_reset_and_goal(gym_env, seed=123)
+            different = sample_reset_and_goal(gym_env, seed=124)
+
+            for key, value in first.items():
+                torch.testing.assert_close(value, second[key], rtol=1e-6, atol=1e-6)
+
+            assert not torch.equal(first["reset_rng_state"], different["reset_rng_state"])
+            assert not torch.equal(
+                first["goal_rng_state_before_goal_reset"], different["goal_rng_state_before_goal_reset"]
+            )
+            assert not torch.allclose(
+                first["goal_rot_after_reward_goal_reset"], different["goal_rot_after_reward_goal_reset"]
+            )
+        finally:
+            gym_env.close()
 
 
 @pytest.mark.parametrize("task", [_ALLEGRO_TASK, _SHADOW_TASK])
@@ -1626,7 +1739,7 @@ def test_reset_cuda_graph_step_recaptures_reset_mask_storage_change():
             assert env._reset_cuda_graph_enabled
             assert env._reset_cuda_graph_disable_reason == ""
             assert env._reset_cuda_graph is not None
-            assert not hasattr(env, "_reset_idx_torch")
+            assert env._inhand_fused_reset_enabled
         finally:
             gym_env.close()
 
@@ -1709,8 +1822,10 @@ def test_reset_cuda_graph_step_uses_mask_before_materializing_env_ids(monkeypatc
         try:
             gym_env.reset()
             calls = []
+            scene_after_graph_calls = []
             original_try_cuda_graph_reset = env._try_reset_idx_cuda_graph
             original_env_ids_from_reset_buf = env._reset_env_ids_from_reset_buf
+            original_scene_reset_after_graph = env.scene.reset_after_graph
 
             def _record_try_cuda_graph_reset(env_ids=None):
                 calls.append(("graph_reset", env_ids is None))
@@ -1720,14 +1835,21 @@ def test_reset_cuda_graph_step_uses_mask_before_materializing_env_ids(monkeypatc
                 calls.append(("nonzero", None))
                 return original_env_ids_from_reset_buf()
 
+            def _record_scene_reset_after_graph(env_ids=None, env_mask=None):
+                scene_after_graph_calls.append((env_ids, env_mask))
+                return original_scene_reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+
             monkeypatch.setattr(env, "_try_reset_idx_cuda_graph", _record_try_cuda_graph_reset)
             monkeypatch.setattr(env, "_reset_env_ids_from_reset_buf", _record_env_ids_from_reset_buf)
+            monkeypatch.setattr(env.scene, "reset_after_graph", _record_scene_reset_after_graph)
 
             gym_env.step(_zero_actions(env))
             torch.cuda.synchronize()
 
             assert calls[0] == ("graph_reset", True)
             assert calls[1] == ("nonzero", None)
+            assert len(scene_after_graph_calls) == 1
+            assert scene_after_graph_calls[0][1] is None
             assert env._reset_cuda_graph_enabled
             torch.testing.assert_close(env.episode_length_buf, torch.zeros_like(env.episode_length_buf))
         finally:
@@ -2188,7 +2310,7 @@ def test_inhand_fused_reset_rewraps_after_reset_storage_change():
 
         try:
             gym_env.reset()
-            assert not hasattr(env, "_reset_idx_torch")
+            assert env._inhand_fused_reset_enabled
             env.prev_targets = env.prev_targets.clone()
 
             reset_env_ids = torch.tensor([0, 2], dtype=torch.int32, device=env.device)

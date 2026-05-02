@@ -413,7 +413,24 @@ def test_wrench_composer_graph_split_partial_reset_matches_reset(device: str):
 
 
 @pytest.mark.parametrize("device", ["cuda:0", "cpu"])
-def test_wrench_composer_graph_split_full_reset_preserves_python_flags(device: str):
+def test_wrench_composer_reset_graphable_does_not_mutate_python_flags(device: str):
+    mock_asset = create_mock_asset(num_envs=2, num_bodies=2, device=device)
+    composer = WrenchComposer(mock_asset)
+    forces_np = np.ones((2, 2, 3), dtype=np.float32)
+    forces = wp.from_numpy(forces_np, dtype=wp.vec3f, device=device)
+
+    composer.add_forces_and_torques_index(forces=forces)
+    assert composer.active
+    assert composer._dirty
+
+    composer.reset_graphable()
+
+    assert composer.active
+    assert composer._dirty
+
+
+@pytest.mark.parametrize("device", ["cuda:0", "cpu"])
+def test_wrench_composer_graph_split_full_reset_matches_full_reset_flags(device: str):
     mock_asset = create_mock_asset(num_envs=2, num_bodies=2, device=device)
     composer = WrenchComposer(mock_asset)
     forces_np = np.ones((2, 2, 3), dtype=np.float32)

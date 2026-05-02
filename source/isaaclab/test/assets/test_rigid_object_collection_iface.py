@@ -277,6 +277,35 @@ _index_resolution_backends = pytest.mark.parametrize(
 
 
 # ---------------------------------------------------------------------------
+# Tests: Reset helpers
+# ---------------------------------------------------------------------------
+
+
+class TestRigidObjectCollectionReset:
+    """Test backend-specific rigid object collection reset contracts."""
+
+    @pytest.mark.skipif("newton" not in BACKENDS, reason="Newton backend is not available.")
+    def test_newton_mask_only_graphable_reset_keeps_mask_as_selector(self):
+        collection, _ = create_newton_rigid_object_collection(num_instances=4, num_bodies=2, device="cpu")
+        composer_calls = []
+
+        class _FakeComposer:
+            def reset_graphable(self, env_ids=None, env_mask=None):
+                composer_calls.append((env_ids, env_mask))
+
+        collection._instantaneous_wrench_composer = _FakeComposer()
+        collection._permanent_wrench_composer = _FakeComposer()
+        env_mask = wp.array([False, True, False, True], dtype=wp.bool, device="cpu")
+
+        collection.reset_graphable(env_mask=env_mask)
+
+        assert len(composer_calls) == 2
+        for env_ids, observed_mask in composer_calls:
+            assert env_ids is None
+            assert observed_mask is env_mask
+
+
+# ---------------------------------------------------------------------------
 # Writer/setter test helpers
 # ---------------------------------------------------------------------------
 

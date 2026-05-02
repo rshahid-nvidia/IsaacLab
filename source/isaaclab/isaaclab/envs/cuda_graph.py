@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -17,6 +18,8 @@ import torch
 import warp as wp
 
 
+logger = logging.getLogger(__name__)
+
 try:
     _cudart = ctypes.CDLL("libcudart.so.12")
 except OSError:
@@ -24,6 +27,12 @@ except OSError:
         _cudart = ctypes.CDLL("libcudart.so")
     except OSError:
         _cudart = None
+
+if _cudart is None:
+    logger.warning(
+        "CUDA runtime library was not found; relaxed CUDA graph capture is unavailable and reset graph capture will "
+        "fall back to Warp's strict ScopedCapture."
+    )
 
 
 @dataclass(frozen=True)

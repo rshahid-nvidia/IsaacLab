@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+import torch
 import warp as wp
 
 import isaaclab.sim as sim_utils
@@ -194,10 +195,15 @@ class SensorBase(ABC):
         """Run reset work that remains outside CUDA graph replay.
 
         The base sensor reset is graphable. Sensors with additional reset behavior that is not graph-capturable should
-        keep using their existing full :meth:`reset` implementation here or override this method with only the residual
-        Python-side work.
+        keep using their existing full :meth:`reset` implementation here, or override this method with only the residual
+        Python-side work. The default fallback runs the full reset only for legacy subclasses that override
+        :meth:`reset`; a plain :class:`SensorBase` implementation has no residual work after :meth:`reset_graphable`.
+        Residual hooks may run after graphable reset work for every scene entity has replayed, so they must not rely on
+        reading another entity's freshly-reset GPU state.
         """
 
+        if type(self).reset is SensorBase.reset:
+            return
         self.reset(env_ids=env_ids, env_mask=env_mask)
 
     def reset_graph_tensors(self) -> dict[str, wp.array]:
@@ -428,6 +434,10 @@ class SensorBase(ABC):
             return env_mask
         else:
             self._reset_mask.zero_()
+            if isinstance(env_ids, wp.array):
+                env_ids = wp.to_torch(env_ids)
+            if torch.is_tensor(env_ids):
+                env_ids = env_ids.to(device=self._device, dtype=torch.long)
             self._reset_mask_torch[env_ids] = True
             return self._reset_mask
 

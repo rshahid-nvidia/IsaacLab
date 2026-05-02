@@ -272,6 +272,33 @@ _index_resolution_backends = pytest.mark.parametrize(
 # ---------------------------------------------------------------------------
 
 
+class TestRigidObjectReset:
+    """Test backend-specific rigid object reset contracts."""
+
+    @pytest.mark.skipif("newton" not in BACKENDS, reason="Newton backend is not available.")
+    def test_newton_full_reset_uses_indexed_wrench_reset_to_preserve_active_flags(self):
+        rigid_object, _ = create_newton_rigid_object(num_instances=4, device="cpu")
+        composer_calls = []
+
+        class _FakeComposer:
+            def reset_graphable(self, env_ids=None, env_mask=None):
+                composer_calls.append(("graphable", env_ids, env_mask))
+
+            def reset_after_graph(self, env_ids=None, env_mask=None):
+                composer_calls.append(("after_graph", env_ids, env_mask))
+
+        rigid_object._instantaneous_wrench_composer = _FakeComposer()
+        rigid_object._permanent_wrench_composer = _FakeComposer()
+
+        rigid_object.reset()
+
+        assert len(composer_calls) == 4
+        for _, env_ids, env_mask in composer_calls:
+            assert isinstance(env_ids, slice)
+            assert env_ids == slice(None)
+            assert env_mask is None
+
+
 class TestRigidObjectIndexResolution:
     """Test backend-specific index resolution helpers."""
 

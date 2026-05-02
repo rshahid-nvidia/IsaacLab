@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 _RESET_CUDA_GRAPH_MODES = ("off", "auto", "force")
 
 
+    if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
+
+
+    if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
+
+
 @wp.kernel
 def _reset_episode_lengths_by_mask(reset_mask: wp.array(dtype=wp.bool), episode_length_buf: wp.array(dtype=wp.int64)):
     env_id = wp.tid()
@@ -890,7 +896,9 @@ class DirectRLEnv(gym.Env):
         Args:
             env_ids: Environment ids selected for reset, matching the argument passed to :meth:`_reset_idx`. When
                 ``None``, graph-captured work consumes :attr:`reset_buf` through the reset mask and subclass residual
-                hooks may materialize ids later only if they need them.
+                hooks may materialize ids later only if they need them. When concrete ids are provided, this wrapper
+                rewrites :attr:`reset_buf` before replay so graphable mask work and residual id work consume the same
+                reset selection; callers should treat the provided ids as the reset mask source of truth.
 
         Returns:
             Materialized environment ids when the subclass consumed the reset and needed ids, or ``None`` to fall back

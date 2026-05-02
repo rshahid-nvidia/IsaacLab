@@ -238,7 +238,10 @@ class AssetBase(ABC):
     def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
         """Run reset work that remains outside CUDA graph replay.
 
-        Unsupported assets fall back to their existing full reset implementation.
+        Unsupported assets fall back to their existing full reset implementation. Because that legacy reset API is
+        env-id based, callers that use this default fallback must pass concrete ``env_ids``; a mask-only reset requires
+        the asset to override this method. Residual hooks may run after graphable reset work for every scene entity has
+        replayed, so they must not rely on reading another entity's freshly-reset GPU state.
         """
 
         if env_ids is None and env_mask is not None:
