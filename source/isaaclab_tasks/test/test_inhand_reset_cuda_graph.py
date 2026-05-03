@@ -82,6 +82,34 @@ def _warp_buffer_to_torch(buffer):
     return buffer.torch if hasattr(buffer, "torch") else wp.to_torch(buffer)
 
 
+def _dirty_camera_reset_state(camera, frame_value: int = 17) -> None:
+    camera._frame.fill_(frame_value)
+    camera._data.pos_w.fill_(-123.0)
+    camera._data.quat_w_world.fill_(0.25)
+    wp.to_torch(camera._is_outdated).zero_()
+    wp.to_torch(camera._timestamp).fill_(9.0)
+    wp.to_torch(camera._timestamp_last_update).fill_(4.0)
+    wp.to_torch(camera._render_data.camera_transforms).zero_()
+
+
+def _snapshot_camera_reset_state(camera) -> dict[str, torch.Tensor]:
+    return {
+        "frame": camera._frame.detach().clone(),
+        "pos_w": camera._data.pos_w.detach().clone(),
+        "quat_w_world": camera._data.quat_w_world.detach().clone(),
+        "is_outdated": wp.to_torch(camera._is_outdated).detach().clone(),
+        "timestamp": wp.to_torch(camera._timestamp).detach().clone(),
+        "timestamp_last_update": wp.to_torch(camera._timestamp_last_update).detach().clone(),
+        "camera_transforms": wp.to_torch(camera._render_data.camera_transforms).detach().clone(),
+    }
+
+
+def _assert_camera_reset_states_close(actual: dict[str, torch.Tensor], expected: dict[str, torch.Tensor]) -> None:
+    assert actual.keys() == expected.keys()
+    for name, actual_tensor in actual.items():
+        torch.testing.assert_close(actual_tensor, expected[name])
+
+
 def _make_launcher_args() -> argparse.Namespace:
     return argparse.Namespace(
         distributed=False,
@@ -663,18 +691,13 @@ def test_reset_cuda_graph_runs_scene_reset_for_vision_sensors(monkeypatch):
 
         try:
             gym_env.reset()
-            sensor_reset_env_ids = []
-            for sensor in env.scene.sensors.values():
-                original_reset = sensor.reset
+            camera = env.scene.sensors["tiled_camera"]
+            assert camera._supports_graphable_camera_reset()
 
-                def _record_sensor_reset(env_ids=None, env_mask=None, original_reset=original_reset):
-                    if torch.is_tensor(env_ids):
-                        sensor_reset_env_ids.append(env_ids.detach().clone())
-                    else:
-                        sensor_reset_env_ids.append(env_ids)
-                    return original_reset(env_ids=env_ids, env_mask=env_mask)
+            def _unexpected_camera_reset(env_ids=None, env_mask=None):
+                raise AssertionError("Newton camera graphable reset should not call full Camera.reset().")
 
-                monkeypatch.setattr(sensor, "reset", _record_sensor_reset)
+            monkeypatch.setattr(camera, "reset", _unexpected_camera_reset)
 
             obs, reward, time_outs, extras = _step_until_all_envs_timeout(gym_env)
 
@@ -682,11 +705,94 @@ def test_reset_cuda_graph_runs_scene_reset_for_vision_sensors(monkeypatch):
             assert "critic" in obs
             _assert_graph_reset_to_default_state(gym_env, obs, reward, time_outs, extras, expected_success_rate=0.0)
             assert torch.isfinite(obs["critic"]).all()
-            assert sensor_reset_env_ids
-            torch.testing.assert_close(
-                sensor_reset_env_ids[-1],
-                torch.arange(env.num_envs, dtype=torch.int32, device=env.device),
-            )
+        finally:
+            gym_env.close()
+
+
+def test_newton_camera_reset_graphable_matches_full_reset():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the Newton camera graphable reset path.")
+
+    cfg = _make_newton_cfg(
+        _SHADOW_VISION_BENCHMARK_TASK,
+        num_envs=4,
+        presets="newton,newton_renderer,rgb",
+    )
+    cfg.reset_cuda_graph = "off"
+    cfg.tiled_camera.width = 32
+    cfg.tiled_camera.height = 32
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_SHADOW_VISION_BENCHMARK_TASK, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            gym_env.reset()
+            camera = env.scene.sensors["tiled_camera"]
+            assert camera._supports_graphable_camera_reset()
+
+            reset_env_ids = torch.tensor([1, 3], dtype=torch.int32, device=env.device)
+            reset_mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            reset_mask[reset_env_ids.to(dtype=torch.long)] = True
+            reset_mask_wp = wp.from_torch(reset_mask, dtype=wp.bool)
+
+            _dirty_camera_reset_state(camera)
+            camera.reset(env_ids=reset_env_ids)
+            torch.cuda.synchronize()
+            reference = _snapshot_camera_reset_state(camera)
+
+            _dirty_camera_reset_state(camera)
+            camera.reset_graphable(env_ids=None, env_mask=reset_mask_wp)
+            camera.reset_after_graph(env_ids=reset_env_ids, env_mask=None)
+            torch.cuda.synchronize()
+            graphable = _snapshot_camera_reset_state(camera)
+
+            _assert_camera_reset_states_close(graphable, reference)
+        finally:
+            gym_env.close()
+
+
+def test_reset_cuda_graph_tracks_newton_camera_graph_buffers():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the Newton camera graphable reset path.")
+
+    cfg = _make_newton_cfg(
+        _SHADOW_VISION_BENCHMARK_TASK,
+        num_envs=4,
+        presets="newton,newton_renderer,rgb",
+    )
+    cfg.tiled_camera.width = 32
+    cfg.tiled_camera.height = 32
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_SHADOW_VISION_BENCHMARK_TASK, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            gym_env.reset()
+            tensors = env._reset_cuda_graph_tensors()
+            expected = {
+                "scene.sensor.tiled_camera.frame",
+                "scene.sensor.tiled_camera.pos_w",
+                "scene.sensor.tiled_camera.quat_w_world",
+                "scene.sensor.tiled_camera.view.body_q",
+                "scene.sensor.tiled_camera.view.site_body",
+                "scene.sensor.tiled_camera.view.site_local",
+                "scene.sensor.tiled_camera.view.pos_buf",
+                "scene.sensor.tiled_camera.view.quat_buf",
+                "scene.sensor.tiled_camera.renderer.camera_transforms",
+            }
+            assert expected <= set(tensors)
         finally:
             gym_env.close()
 
@@ -1058,7 +1164,7 @@ def test_reset_cuda_graph_partial_reset_preserves_unmasked_envs_and_intermediate
             gym_env.close()
 
 
-def test_reset_cuda_graph_apply_graph_preserves_lazy_acceleration_buffers():
+def test_reset_cuda_graph_task_apply_graph_preserves_lazy_acceleration_buffers():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
 
@@ -1078,7 +1184,7 @@ def test_reset_cuda_graph_apply_graph_preserves_lazy_acceleration_buffers():
             gym_env.reset()
             env._reset_idx_cuda_graph(torch.tensor([0], dtype=torch.int32, device=env.device))
             torch.cuda.synchronize()
-            assert env._reset_apply_cuda_graph is not None
+            assert env._reset_cuda_graph is not None
 
             # Force the lazy acceleration properties into the hard case: stale Python timestamps before replay.
             env.hand.data._joint_acc.timestamp = -1.0
@@ -1249,7 +1355,7 @@ def test_reset_cuda_graph_no_reset_step_entrypoint_is_noop_after_capture():
             env.reset_buf[reset_env_ids.to(dtype=torch.long)] = True
             assert env._reset_idx_cuda_graph(reset_env_ids)
             torch.cuda.synchronize()
-            graphs = (env._reset_common_cuda_graph, env._reset_cuda_graph, env._reset_apply_cuda_graph)
+            graphs = (env._reset_common_cuda_graph, env._reset_cuda_graph)
 
             env.episode_length_buf[:] = torch.arange(env.num_envs, dtype=torch.int64, device=env.device) + 3
             env.successes[:] = torch.arange(env.num_envs, dtype=torch.float32, device=env.device) + 1.0
@@ -1276,7 +1382,6 @@ def test_reset_cuda_graph_no_reset_step_entrypoint_is_noop_after_capture():
             assert materialized_env_ids.numel() == 0
             assert env._reset_common_cuda_graph is graphs[0]
             assert env._reset_cuda_graph is graphs[1]
-            assert env._reset_apply_cuda_graph is graphs[2]
             for name, value in before.items():
                 current = {
                     "episode_length_buf": env.episode_length_buf,
@@ -2021,7 +2126,7 @@ def test_reset_cuda_graph_step_uses_mask_before_materializing_env_ids(monkeypatc
             gym_env.close()
 
 
-def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
+def test_reset_cuda_graph_orders_common_residual_before_task_apply_graph(monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the in-hand reset CUDA graph path.")
 
@@ -2054,14 +2159,15 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
             original_scene_reset_after_graph = env.scene.reset_after_graph
             original_apply_after = env._apply_inhand_reset_to_sim_after_graph
             original_noise_reset = env._action_noise_model.reset
+            original_task_prepare = env._launch_inhand_task_reset_prepare
+            original_apply_graphable = env._launch_inhand_reset_to_sim_graphable
 
             def _record_launch_phase(graph_attr, phase_name, launch_fn, *, prepare_capture=None):
                 if graph_attr == "_reset_common_cuda_graph":
                     order.append("common_graph")
                 elif graph_attr == "_reset_cuda_graph":
-                    order.append("task_graph")
-                elif graph_attr == "_reset_apply_cuda_graph":
-                    order.append("apply_graph")
+                    assert phase_name == "task/apply reset"
+                    order.append("task_apply_graph")
                 else:
                     order.append("unknown_graph")
                 return original_launch_phase(graph_attr, phase_name, launch_fn, prepare_capture=prepare_capture)
@@ -2082,11 +2188,21 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
                 order.append("apply_after")
                 return original_apply_after()
 
+            def _record_task_prepare(ctx):
+                order.append("task_prepare")
+                return original_task_prepare(ctx)
+
+            def _record_apply_graphable(ctx):
+                order.append("apply_graphable")
+                return original_apply_graphable(ctx)
+
             monkeypatch.setattr(env, "_launch_reset_cuda_graph_phase", _record_launch_phase)
             monkeypatch.setattr(env, "_reset_idx_common_after_graph", _record_common_after)
             monkeypatch.setattr(env.scene, "reset_after_graph", _record_scene_reset_after_graph)
             monkeypatch.setattr(env._action_noise_model, "reset", _record_noise_reset)
             monkeypatch.setattr(env, "_apply_inhand_reset_to_sim_after_graph", _record_apply_after)
+            monkeypatch.setattr(env, "_launch_inhand_task_reset_prepare", _record_task_prepare)
+            monkeypatch.setattr(env, "_launch_inhand_reset_to_sim_graphable", _record_apply_graphable)
 
             reset_env_ids = torch.tensor([0, 2], dtype=torch.int32, device=env.device)
             env.reset_buf.zero_()
@@ -2097,12 +2213,20 @@ def test_reset_cuda_graph_orders_common_residual_before_task_graph(monkeypatch):
 
             assert env._reset_common_cuda_graph is not None
             assert env._reset_cuda_graph is not None
-            assert env._reset_apply_cuda_graph is not None
             assert env._reset_common_cuda_graph is not env._reset_cuda_graph
-            assert order == ["common_graph", "common_after", "noise", "task_graph", "apply_graph", "apply_after"]
+            assert order == [
+                "common_graph",
+                "common_after",
+                "noise",
+                "task_apply_graph",
+                "task_prepare",
+                "apply_graphable",
+                "apply_after",
+            ]
             assert len(scene_after_graph_calls) == 1
             torch.testing.assert_close(scene_after_graph_calls[0][0], reset_env_ids)
             assert scene_after_graph_calls[0][1] is None
+            _assert_intermediates_match_canonical_recompute(env)
         finally:
             gym_env.close()
 

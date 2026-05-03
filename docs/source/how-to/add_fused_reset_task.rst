@@ -14,12 +14,18 @@ Use a fused reset path when all of the following are true:
 
 * The task runs on the Newton backend with CUDA tensors.
 * The workload uses many environments and reset/done/reward kernels are launch-overhead dominated.
-* The reset math can be expressed as Warp kernels over stable per-environment buffers.
+* The reset math can be expressed as Warp kernels or graph-capturable Torch operations over stable
+  per-environment buffers.
 * Any Python-side reset state can run before or after the graphable kernels without reading freshly reset GPU state
   from another entity out of order.
 
-Do not add this path only to avoid writing an efficient Torch implementation. The Torch path remains the semantic
-fallback for unsupported backends, CPU runs, and tests that compare the fused kernels against the reference behavior.
+Do not add this path only to avoid writing an efficient Torch implementation. Prefer graph-captured Torch operations
+when they preserve semantics and avoid dynamic selector shapes. In particular, PyTorch's CUDA graph integration can
+handle allocator-owned temporaries, but the external tensors read or written across replay still need stable storage.
+Under Isaac Lab's relaxed Warp/CUDA capture helper, replay-time Torch RNG does not advance today; reset logic that
+must randomize on every replay should use a task-owned RNG kernel or stay outside capture until that capture path
+changes. The Torch path remains the semantic fallback for unsupported backends, CPU runs, and tests that compare fused
+kernels against the reference behavior.
 
 Reset Phases
 ------------

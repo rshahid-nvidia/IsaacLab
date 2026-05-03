@@ -717,6 +717,18 @@ class NewtonSiteFrameView(BaseFrameView):
         )
         return self._pos_ta, self._quat_ta
 
+    def world_pose_graph_tensors(self) -> dict[str, wp.array]:
+        """Return arrays captured by full-view world-pose graphable queries."""
+
+        state = NewtonManager.get_state_0()
+        return {
+            "body_q": state.body_q,
+            "site_body": self._site_body,
+            "site_local": self._site_local,
+            "pos_buf": self._pos_buf,
+            "quat_buf": self._quat_buf,
+        }
+
     def set_world_poses(
         self,
         positions: wp.array | None = None,

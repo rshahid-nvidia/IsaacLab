@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal
 
@@ -23,6 +24,8 @@ from isaaclab.utils import to_camel_case
 from isaaclab.utils.math import (
     convert_camera_frame_orientation_convention,
     create_rotation_matrix_from_view,
+    matrix_from_euler,
+    matrix_from_quat,
     quat_from_matrix,
 )
 
@@ -133,6 +136,8 @@ class Camera(SensorBase):
         # Renderer and render data — assigned in _initialize_impl.
         self._renderer: BaseRenderer | None = None
         self._render_data = None
+        self._opengl_to_world_rotation: torch.Tensor | None = None
+        self._camera_reset_graphable_active = False
 
     def _register_renderer_scene_data_requirements(self) -> None:
         """Register renderer requirements early enough for clone-time prebuilds."""
@@ -359,6 +364,7 @@ class Camera(SensorBase):
             raise RuntimeError(
                 "Camera could not be initialized. Please ensure --enable_cameras is used to enable rendering."
             )
+        self._camera_reset_graphable_active = False
         # reset the timestamps
         super().reset(env_ids, env_mask)
         # resolve to indices for torch indexing
@@ -371,6 +377,56 @@ class Camera(SensorBase):
         self._update_poses(env_ids)
         # Reset the frame count
         self._frame[env_ids] = 0
+
+    def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> wp.array:
+        """Launch graph-capturable camera reset work when the backend supports it.
+
+        The optimized path is intentionally narrow: it requires a stable mask selector and a renderer/view pair that
+        advertises graphable camera reset support. Unsupported backends keep using the base sensor graphable reset plus
+        the residual full :meth:`reset` from :meth:`reset_after_graph`.
+        """
+
+        if not self._is_initialized:
+            raise RuntimeError(
+                "Camera could not be initialized. Please ensure --enable_cameras is used to enable rendering."
+            )
+        if env_mask is not None and self._supports_graphable_camera_reset():
+            self._camera_reset_graphable_active = True
+            env_mask = super().reset_graphable(env_ids=None, env_mask=env_mask)
+            self._update_poses_graphable(env_mask)
+            self._frame.masked_fill_(wp.to_torch(env_mask), 0)
+            return env_mask
+
+        self._camera_reset_graphable_active = False
+        return super().reset_graphable(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+        """Run camera reset residual work that remains outside graph replay."""
+
+        if self._camera_reset_graphable_active:
+            return
+        self.reset(env_ids=env_ids, env_mask=env_mask)
+
+    def reset_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
+        """Return tensors and Warp arrays captured by graphable camera reset."""
+
+        tensors: dict[str, torch.Tensor | wp.array] = dict(super().reset_graph_tensors())
+        if not self._is_initialized or not self._supports_graphable_camera_reset():
+            return tensors
+
+        tensors["frame"] = self._frame
+        tensors["pos_w"] = self._data.pos_w
+        tensors["quat_w_world"] = self._data.quat_w_world
+        tensors["opengl_to_world_rotation"] = self._opengl_to_world_rotation
+
+        view_tensors = self._view.world_pose_graph_tensors()
+        for name, tensor in view_tensors.items():
+            tensors[f"view.{name}"] = tensor
+
+        graph_tensors = self._renderer.camera_reset_graph_tensors(self._render_data, self._view)
+        for name, tensor in graph_tensors.items():
+            tensors[f"renderer.{name}"] = tensor
+        return tensors
 
     """
     Implementation.
@@ -413,6 +469,9 @@ class Camera(SensorBase):
         self._ALL_INDICES = torch.arange(self._view.count, device=self._device, dtype=torch.long)
         # Create frame count buffer
         self._frame = torch.zeros(self._view.count, device=self._device, dtype=torch.long)
+        self._opengl_to_world_rotation = matrix_from_euler(
+            torch.tensor([math.pi / 2, -math.pi / 2, 0.0], device=self._device), "XYZ"
+        ).T.contiguous()
 
         # Convert all encapsulated prims to Camera
         for cam_prim in self._view.prims:
@@ -565,6 +624,35 @@ class Camera(SensorBase):
             self._renderer.update_camera(
                 self._render_data, self._data.pos_w, self._data.quat_w_world, self._data.intrinsic_matrices
             )
+
+    def _supports_graphable_camera_reset(self) -> bool:
+        support_fn = getattr(self._renderer, "supports_camera_reset_graphable", None)
+        return (
+            callable(support_fn)
+            and self._render_data is not None
+            and self._data is not None
+            and self._view is not None
+            and self._opengl_to_world_rotation is not None
+            and support_fn(self._render_data, self._view)
+        )
+
+    def _update_poses_graphable(self, env_mask: wp.array) -> None:
+        """Update camera pose data through full-view, mask-stable operations."""
+
+        if len(self._sensor_prims) == 0:
+            raise RuntimeError("Camera prim is None. Please call 'sim.play()' first.")
+
+        pos_w, quat_w = self._view.get_world_poses(None)
+        env_mask_torch = wp.to_torch(env_mask)
+        env_mask_column = env_mask_torch.unsqueeze(-1)
+
+        torch.where(env_mask_column, pos_w.torch, self._data.pos_w, out=self._data.pos_w)
+        quat_w_world = quat_from_matrix(torch.matmul(matrix_from_quat(quat_w.torch), self._opengl_to_world_rotation))
+        torch.where(env_mask_column, quat_w_world, self._data.quat_w_world, out=self._data.quat_w_world)
+
+        self._renderer.update_camera(
+            self._render_data, self._data.pos_w, self._data.quat_w_world, self._data.intrinsic_matrices
+        )
 
     """
     Internal simulation callbacks.

@@ -155,6 +155,41 @@ def _prepare_inhand_reset(
     successes[env_id] = wp.float32(0.0)
 
 
+@wp.func
+def _write_inhand_intermediate_wp(
+    env_id: wp.int32,
+    hand_body_pose_w: wp.array2d(dtype=wp.transformf),
+    hand_body_vel_w: wp.array2d(dtype=wp.spatial_vectorf),
+    finger_bodies: wp.array(dtype=wp.int32),
+    env_origins: wp.array(dtype=wp.vec3f),
+    object_root_pose_w: wp.array(dtype=wp.transformf),
+    object_root_vel_w: wp.array(dtype=wp.spatial_vectorf),
+    num_fingertips: wp.int32,
+    fingertip_pos: wp.array2d(dtype=wp.vec3f),
+    fingertip_rot: wp.array2d(dtype=wp.quatf),
+    fingertip_velocities: wp.array2d(dtype=wp.spatial_vectorf),
+    object_pos: wp.array(dtype=wp.vec3f),
+    object_rot: wp.array(dtype=wp.quatf),
+    object_velocities: wp.array(dtype=wp.spatial_vectorf),
+    object_linvel: wp.array(dtype=wp.vec3f),
+    object_angvel: wp.array(dtype=wp.vec3f),
+):
+    for i in range(num_fingertips):
+        body_id = finger_bodies[i]
+        pose = hand_body_pose_w[env_id, body_id]
+        fingertip_pos[env_id, i] = wp.transform_get_translation(pose) - env_origins[env_id]
+        fingertip_rot[env_id, i] = wp.transform_get_rotation(pose)
+        fingertip_velocities[env_id, i] = hand_body_vel_w[env_id, body_id]
+
+    obj_pose = object_root_pose_w[env_id]
+    obj_vel = object_root_vel_w[env_id]
+    object_pos[env_id] = wp.transform_get_translation(obj_pose) - env_origins[env_id]
+    object_rot[env_id] = wp.transform_get_rotation(obj_pose)
+    object_velocities[env_id] = obj_vel
+    object_linvel[env_id] = wp.vec3f(obj_vel[0], obj_vel[1], obj_vel[2])
+    object_angvel[env_id] = wp.vec3f(obj_vel[3], obj_vel[4], obj_vel[5])
+
+
 @wp.kernel
 def _compute_inhand_intermediate(
     hand_body_pose_w: wp.array2d(dtype=wp.transformf),
@@ -174,21 +209,24 @@ def _compute_inhand_intermediate(
     object_angvel: wp.array(dtype=wp.vec3f),
 ):
     env_id = wp.tid()
-
-    for i in range(num_fingertips):
-        body_id = finger_bodies[i]
-        pose = hand_body_pose_w[env_id, body_id]
-        fingertip_pos[env_id, i] = wp.transform_get_translation(pose) - env_origins[env_id]
-        fingertip_rot[env_id, i] = wp.transform_get_rotation(pose)
-        fingertip_velocities[env_id, i] = hand_body_vel_w[env_id, body_id]
-
-    obj_pose = object_root_pose_w[env_id]
-    obj_vel = object_root_vel_w[env_id]
-    object_pos[env_id] = wp.transform_get_translation(obj_pose) - env_origins[env_id]
-    object_rot[env_id] = wp.transform_get_rotation(obj_pose)
-    object_velocities[env_id] = obj_vel
-    object_linvel[env_id] = wp.vec3f(obj_vel[0], obj_vel[1], obj_vel[2])
-    object_angvel[env_id] = wp.vec3f(obj_vel[3], obj_vel[4], obj_vel[5])
+    _write_inhand_intermediate_wp(
+        env_id,
+        hand_body_pose_w,
+        hand_body_vel_w,
+        finger_bodies,
+        env_origins,
+        object_root_pose_w,
+        object_root_vel_w,
+        num_fingertips,
+        fingertip_pos,
+        fingertip_rot,
+        fingertip_velocities,
+        object_pos,
+        object_rot,
+        object_velocities,
+        object_linvel,
+        object_angvel,
+    )
 
 
 @wp.func
@@ -227,24 +265,27 @@ def _compute_inhand_intermediate_and_dones(
     reset_time_outs: wp.array(dtype=wp.bool),
 ):
     env_id = wp.tid()
+    _write_inhand_intermediate_wp(
+        env_id,
+        hand_body_pose_w,
+        hand_body_vel_w,
+        finger_bodies,
+        env_origins,
+        object_root_pose_w,
+        object_root_vel_w,
+        num_fingertips,
+        fingertip_pos,
+        fingertip_rot,
+        fingertip_velocities,
+        object_pos,
+        object_rot,
+        object_velocities,
+        object_linvel,
+        object_angvel,
+    )
 
-    for i in range(num_fingertips):
-        body_id = finger_bodies[i]
-        pose = hand_body_pose_w[env_id, body_id]
-        fingertip_pos[env_id, i] = wp.transform_get_translation(pose) - env_origins[env_id]
-        fingertip_rot[env_id, i] = wp.transform_get_rotation(pose)
-        fingertip_velocities[env_id, i] = hand_body_vel_w[env_id, body_id]
-
-    obj_pose = object_root_pose_w[env_id]
-    obj_vel = object_root_vel_w[env_id]
-    obj_pos = wp.transform_get_translation(obj_pose) - env_origins[env_id]
-    obj_rot = wp.transform_get_rotation(obj_pose)
-    object_pos[env_id] = obj_pos
-    object_rot[env_id] = obj_rot
-    object_velocities[env_id] = obj_vel
-    object_linvel[env_id] = wp.vec3f(obj_vel[0], obj_vel[1], obj_vel[2])
-    object_angvel[env_id] = wp.vec3f(obj_vel[3], obj_vel[4], obj_vel[5])
-
+    obj_pos = object_pos[env_id]
+    obj_rot = object_rot[env_id]
     goal_delta = obj_pos - in_hand_pos[env_id]
     goal_dist = wp.sqrt(goal_delta[0] * goal_delta[0] + goal_delta[1] * goal_delta[1] + goal_delta[2] * goal_delta[2])
     reset_terminated[env_id] = goal_dist >= fall_dist
@@ -922,14 +963,12 @@ class InHandManipulationEnv(DirectRLEnv):
     def _clear_reset_cuda_graph_captures(self) -> None:
         super()._clear_reset_cuda_graph_captures()
         self._reset_common_cuda_graph = None
-        self._reset_apply_cuda_graph = None
 
     def _warmup_reset_cuda_graph(self) -> None:
         empty_ctx = ResetContext(env_ids=None, reset_mask_wp=self._reset_empty_mask_wp)
         self._reset_idx_common_graphable(empty_ctx, reset_episode_lengths=False)
-        self._launch_inhand_task_reset_graphable(empty_ctx)
         self._prepare_inhand_reset_to_sim_capture_state()
-        self._launch_inhand_reset_to_sim_graphable(empty_ctx)
+        self._launch_inhand_task_apply_reset_graphable(empty_ctx)
 
     def _reset_cuda_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
         """Return tensors whose storage and metadata must remain stable for reset graph replay."""
@@ -1126,6 +1165,12 @@ class InHandManipulationEnv(DirectRLEnv):
             ],
             device=self.device,
         )
+
+    def _launch_inhand_task_apply_reset_graphable(self, ctx: ResetContext) -> None:
+        """Launch graph-capturable task reset preparation and simulation apply work."""
+
+        self._launch_inhand_task_reset_graphable(ctx)
+        self._launch_inhand_reset_to_sim_graphable(ctx)
 
     def _apply_inhand_reset_to_sim_after_graph(self) -> None:
         """Update Python-side lazy state after replaying graph-captured reset writes."""
@@ -1451,13 +1496,8 @@ class InHandManipulationEnv(DirectRLEnv):
                 ),
                 ResetGraphPhase(
                     graph_attr="_reset_cuda_graph",
-                    name="task reset",
-                    launch_fn=self._launch_inhand_task_reset_graphable,
-                ),
-                ResetGraphPhase(
-                    graph_attr="_reset_apply_cuda_graph",
-                    name="apply reset",
-                    launch_fn=self._launch_inhand_reset_to_sim_graphable,
+                    name="task/apply reset",
+                    launch_fn=self._launch_inhand_task_apply_reset_graphable,
                     prepare_capture=self._prepare_inhand_reset_to_sim_capture_state,
                     between_hook=after_apply_reset,
                 ),

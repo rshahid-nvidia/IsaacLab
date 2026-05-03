@@ -159,6 +159,16 @@ def _snapshot_env_state(env) -> dict[str, torch.Tensor]:
         "object_root_velocity": env.object.data.root_com_vel_w.torch.clone(),
         "hand_joint_pos": env.hand.data.joint_pos.torch.clone(),
         "hand_joint_vel": env.hand.data.joint_vel.torch.clone(),
+        "fingertip_pos": env.fingertip_pos.clone(),
+        "fingertip_rot": env.fingertip_rot.clone(),
+        "fingertip_velocities": env.fingertip_velocities.clone(),
+        "hand_dof_pos": env.hand_dof_pos.clone(),
+        "hand_dof_vel": env.hand_dof_vel.clone(),
+        "object_pos": env.object_pos.clone(),
+        "object_rot": env.object_rot.clone(),
+        "object_velocities": env.object_velocities.clone(),
+        "object_linvel": env.object_linvel.clone(),
+        "object_angvel": env.object_angvel.clone(),
         "reset_rng_state": _clone_wp_array(env._reset_rng_state_wp),
         "goal_reset_rng_state": _clone_wp_array(env._goal_reset_rng_state_wp),
     }
@@ -214,6 +224,16 @@ def _collect_parity_buffers(env) -> dict[str, torch.Tensor]:
         "object_root_velocity": env.object.data.root_com_vel_w.torch.clone(),
         "hand_joint_pos": env.hand.data.joint_pos.torch.clone(),
         "hand_joint_vel": env.hand.data.joint_vel.torch.clone(),
+        "fingertip_pos": env.fingertip_pos.clone(),
+        "fingertip_rot": env.fingertip_rot.clone(),
+        "fingertip_velocities": env.fingertip_velocities.clone(),
+        "hand_dof_pos": env.hand_dof_pos.clone(),
+        "hand_dof_vel": env.hand_dof_vel.clone(),
+        "object_pos": env.object_pos.clone(),
+        "object_rot": env.object_rot.clone(),
+        "object_velocities": env.object_velocities.clone(),
+        "object_linvel": env.object_linvel.clone(),
+        "object_angvel": env.object_angvel.clone(),
     }
 
 
@@ -390,6 +410,16 @@ def _collect_parity_buffers_from_snapshot(state: dict[str, torch.Tensor]) -> dic
         "object_root_velocity": state["object_root_velocity"],
         "hand_joint_pos": state["hand_joint_pos"],
         "hand_joint_vel": state["hand_joint_vel"],
+        "fingertip_pos": state["fingertip_pos"],
+        "fingertip_rot": state["fingertip_rot"],
+        "fingertip_velocities": state["fingertip_velocities"],
+        "hand_dof_pos": state["hand_dof_pos"],
+        "hand_dof_vel": state["hand_dof_vel"],
+        "object_pos": state["object_pos"],
+        "object_rot": state["object_rot"],
+        "object_velocities": state["object_velocities"],
+        "object_linvel": state["object_linvel"],
+        "object_angvel": state["object_angvel"],
     }
 
 

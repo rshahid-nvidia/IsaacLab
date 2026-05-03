@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -18,7 +19,7 @@ import warp as wp
 
 from isaaclab.renderers import BaseRenderer, RenderBufferKind, RenderBufferSpec
 from isaaclab.sim import SimulationContext
-from isaaclab.utils.math import convert_camera_frame_orientation_convention
+from isaaclab.utils.math import matrix_from_euler, matrix_from_quat, quat_from_matrix
 
 from .newton_warp_renderer_cfg import NewtonWarpRendererCfg
 
@@ -53,7 +54,12 @@ class RenderData:
         self.num_cameras = 1
 
         self.camera_rays: wp.array(dtype=wp.vec3f, ndim=4) = None
-        self.camera_transforms: wp.array(dtype=wp.transformf, ndim=2) = None
+        self.camera_transforms: wp.array(dtype=wp.transformf, ndim=2) = wp.empty(
+            (1, self.newton_sensor.model.world_count), dtype=wp.transformf, device=self.newton_sensor.model.device
+        )
+        self.world_to_opengl_rotation = matrix_from_euler(
+            torch.tensor([math.pi / 2, -math.pi / 2, 0.0], device=str(self.newton_sensor.model.device)), "XYZ"
+        ).contiguous()
         self.outputs = RenderData.CameraOutputs()
         self.width = getattr(sensor.cfg, "width", 100)
         self.height = getattr(sensor.cfg, "height", 100)
@@ -89,13 +95,10 @@ class RenderData:
         return None
 
     def update(self, positions: torch.Tensor, orientations: torch.Tensor, intrinsics: torch.Tensor):
-        converted_orientations = convert_camera_frame_orientation_convention(
-            orientations, origin="world", target="opengl"
+        converted_orientations = quat_from_matrix(
+            torch.matmul(matrix_from_quat(orientations), self.world_to_opengl_rotation)
         )
 
-        self.camera_transforms = wp.empty(
-            (1, self.newton_sensor.model.world_count), dtype=wp.transformf, device=self.newton_sensor.model.device
-        )
         wp.launch(
             RenderData._update_transforms,
             self.newton_sensor.model.world_count,
@@ -223,6 +226,30 @@ class NewtonWarpRenderer(BaseRenderer):
         """Update camera poses and intrinsics.
         See :meth:`~isaaclab.renderers.base_renderer.BaseRenderer.update_camera`."""
         render_data.update(positions, orientations, intrinsics)
+
+    def supports_camera_reset_graphable(self, render_data: RenderData, view: Any) -> bool:
+        """Return whether camera pose reset can be captured by the reset CUDA graph.
+
+        This path is deliberately limited to Newton site-frame views and preallocated renderer buffers. Generic camera
+        backends continue to use the residual full reset path.
+        """
+
+        return (
+            isinstance(render_data, RenderData)
+            and render_data.camera_transforms is not None
+            and render_data.camera_rays is not None
+            and hasattr(view, "world_pose_graph_tensors")
+        )
+
+    def camera_reset_graph_tensors(self, render_data: RenderData, view: Any) -> dict[str, torch.Tensor | wp.array]:
+        """Return renderer-owned arrays captured by graphable camera reset."""
+
+        if not self.supports_camera_reset_graphable(render_data, view):
+            return {}
+        return {
+            "camera_transforms": render_data.camera_transforms,
+            "world_to_opengl_rotation": render_data.world_to_opengl_rotation,
+        }
 
     def render(self, render_data: RenderData):
         """Render and write to output buffers. See :meth:`~isaaclab.renderers.base_renderer.BaseRenderer.render`."""
