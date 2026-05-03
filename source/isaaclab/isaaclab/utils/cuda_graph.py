@@ -92,7 +92,8 @@ def capture_cuda_graph_relaxed(
         )
 
     stream_handle = _create_nonblocking_stream()
-    fresh_stream = wp.Stream(device, cuda_stream=stream_handle, owner=False)
+    wp_device = wp.get_device(device)
+    fresh_stream = wp.Stream(wp_device, cuda_stream=stream_handle, owner=False)
 
     ret = _cudart.cudaStreamBeginCapture(ctypes.c_void_p(stream_handle), ctypes.c_int(CUDA_STREAM_CAPTURE_MODE_RELAXED))
     if ret != 0:
@@ -111,7 +112,10 @@ def capture_cuda_graph_relaxed(
 
     graph = None
     error: Exception | None = None
-    with wp.ScopedStream(fresh_stream, sync_enter=False):
+    torch_device = torch.device(device)
+    torch_stream = torch.cuda.ExternalStream(stream_handle, device=torch_device)
+
+    with wp.ScopedStream(fresh_stream, sync_enter=False), torch.cuda.stream(torch_stream):
         try:
             launch_fn()
         except Exception as exc:

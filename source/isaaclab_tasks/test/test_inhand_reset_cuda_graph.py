@@ -16,6 +16,7 @@ import warp as wp
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.utils import has_kit
 from isaaclab.utils.configclass import configclass
+from isaaclab.utils.cuda_graph import capture_cuda_graph_relaxed, launch_cuda_graph_on_current_torch_stream
 from isaaclab.utils.math import quat_conjugate, quat_mul
 from isaaclab.utils.noise import ConstantNoiseCfg, NoiseModelCfg, NoiseModelWithAdditiveBiasCfg, UniformNoiseCfg
 
@@ -108,6 +109,10 @@ def _assert_camera_reset_states_close(actual: dict[str, torch.Tensor], expected:
     assert actual.keys() == expected.keys()
     for name, actual_tensor in actual.items():
         torch.testing.assert_close(actual_tensor, expected[name])
+
+
+def _snapshot_camera_rgb(camera) -> torch.Tensor:
+    return camera.data.output["rgb"].detach().clone()
 
 
 def _make_launcher_args() -> argparse.Namespace:
@@ -761,6 +766,82 @@ def test_newton_camera_reset_graphable_matches_full_reset():
             gym_env.close()
 
 
+def test_newton_camera_reset_cuda_graph_replay_matches_full_reset(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for the Newton camera graphable reset path.")
+
+    cfg = _make_newton_cfg(
+        _SHADOW_VISION_BENCHMARK_TASK,
+        num_envs=4,
+        presets="newton,newton_renderer,rgb",
+    )
+    cfg.reset_cuda_graph = "off"
+    cfg.tiled_camera.width = 32
+    cfg.tiled_camera.height = 32
+
+    launcher_args = _make_launcher_args()
+    needs_kit, _, _ = compute_kit_requirements(cfg, launcher_args)
+    assert not needs_kit
+
+    with launch_simulation(cfg, launcher_args):
+        assert not has_kit()
+        gym_env = gym.make(_SHADOW_VISION_BENCHMARK_TASK, cfg=cfg)
+        env = gym_env.unwrapped
+
+        try:
+            gym_env.reset()
+            camera = env.scene.sensors["tiled_camera"]
+            camera_reset_supported = camera._supports_graphable_camera_reset()
+
+            reset_env_ids = torch.tensor([1, 3], dtype=torch.int32, device=env.device)
+            reset_mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+            reset_mask[reset_env_ids.to(dtype=torch.long)] = True
+            reset_mask_wp = wp.from_torch(reset_mask, dtype=wp.bool)
+
+            # Force renderer ray allocation before capture; this mirrors the production guard for camera graphability.
+            _ = _snapshot_camera_rgb(camera)
+
+            _dirty_camera_reset_state(camera)
+            camera.reset(env_ids=reset_env_ids)
+            torch.cuda.synchronize()
+            reference_state = _snapshot_camera_reset_state(camera)
+            reference_rgb = _snapshot_camera_rgb(camera)
+
+            _dirty_camera_reset_state(camera)
+            graph = capture_cuda_graph_relaxed(
+                env.device,
+                lambda: camera.reset_graphable(env_ids=None, env_mask=reset_mask_wp),
+            )
+
+            camera_reset_calls = []
+            original_camera_reset = camera.reset
+
+            def _record_camera_reset(env_ids=None, env_mask=None):
+                camera_reset_calls.append((env_ids, env_mask))
+                return original_camera_reset(env_ids=env_ids, env_mask=env_mask)
+
+            monkeypatch.setattr(camera, "reset", _record_camera_reset)
+
+            _dirty_camera_reset_state(camera)
+            replay_stream = launch_cuda_graph_on_current_torch_stream(env.device, graph)
+            with wp.ScopedStream(replay_stream, sync_enter=False):
+                camera.reset_after_graph(env_ids=reset_env_ids, env_mask=None, graphable_reset_applied=True)
+            torch.cuda.synchronize()
+
+            graph_state = _snapshot_camera_reset_state(camera)
+            graph_rgb = _snapshot_camera_rgb(camera)
+
+            _assert_camera_reset_states_close(graph_state, reference_state)
+            torch.testing.assert_close(graph_rgb, reference_rgb)
+            if camera_reset_supported:
+                assert camera_reset_calls == []
+            else:
+                assert len(camera_reset_calls) == 1
+                assert camera_reset_calls[0][1] is None
+        finally:
+            gym_env.close()
+
+
 def test_reset_cuda_graph_tracks_newton_camera_graph_buffers():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the Newton camera graphable reset path.")
@@ -784,8 +865,13 @@ def test_reset_cuda_graph_tracks_newton_camera_graph_buffers():
 
         try:
             gym_env.reset()
+            camera = env.scene.sensors["tiled_camera"]
+            assert camera._supports_graphable_camera_reset()
             tensors = env._reset_cuda_graph_tensors()
             expected = {
+                "scene.sensor.tiled_camera.is_outdated",
+                "scene.sensor.tiled_camera.timestamp",
+                "scene.sensor.tiled_camera.timestamp_last_update",
                 "scene.sensor.tiled_camera.frame",
                 "scene.sensor.tiled_camera.pos_w",
                 "scene.sensor.tiled_camera.quat_w_world",

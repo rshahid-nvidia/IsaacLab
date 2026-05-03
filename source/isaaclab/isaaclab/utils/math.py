@@ -308,10 +308,9 @@ def _sqrt_positive_part(x: torch.Tensor) -> torch.Tensor:
     Reference:
         https://github.com/facebookresearch/pytorch3d/blob/main/pytorch3d/transforms/rotation_conversions.py#L91-L99
     """
-    ret = torch.zeros_like(x)
     positive_mask = x > 0
-    ret[positive_mask] = torch.sqrt(x[positive_mask])
-    return ret
+    safe_x = torch.where(positive_mask, x, torch.ones_like(x))
+    return torch.where(positive_mask, torch.sqrt(safe_x), torch.zeros_like(x))
 
 
 @torch.jit.script
@@ -363,14 +362,14 @@ def quat_from_matrix(matrix: torch.Tensor) -> torch.Tensor:
 
     # We floor here at 0.1 but the exact level is not important; if q_abs is small,
     # the candidate won't be picked.
-    flr = torch.tensor(0.1).to(dtype=q_abs.dtype, device=q_abs.device)
-    quat_candidates = quat_by_rijk / (2.0 * q_abs[..., None].max(flr))
+    quat_candidates = quat_by_rijk / (2.0 * q_abs[..., None].clamp_min(0.1))
 
     # if not for numerical problems, quat_candidates[i] should be same (up to a sign),
     # forall i; we pick the best-conditioned one (with the largest denominator)
-    return quat_candidates[torch.nn.functional.one_hot(q_abs.argmax(dim=-1), num_classes=4) > 0.5, :].reshape(
-        batch_dim + (4,)
-    )
+    flat_candidates = quat_candidates.reshape(-1, 4, 4)
+    flat_best = q_abs.reshape(-1, 4).argmax(dim=-1)
+    gather_idx = flat_best.reshape(-1, 1, 1).expand(-1, 1, 4)
+    return flat_candidates.gather(1, gather_idx).squeeze(1).reshape(batch_dim + (4,))
 
 
 def _axis_angle_rotation(axis: Literal["X", "Y", "Z"], angle: torch.Tensor) -> torch.Tensor:
