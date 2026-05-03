@@ -170,7 +170,13 @@ class RigidObjectCollection(BaseRigidObjectCollection):
             object_mask: Object mask. Not used currently.
         """
         self.reset_graphable(env_ids=env_ids, object_ids=object_ids, env_mask=env_mask, object_mask=object_mask)
-        self.reset_after_graph(env_ids=env_ids, object_ids=object_ids, env_mask=env_mask, object_mask=object_mask)
+        self.reset_after_graph(
+            env_ids=env_ids,
+            object_ids=object_ids,
+            env_mask=env_mask,
+            object_mask=object_mask,
+            graphable_reset_applied=True,
+        )
 
     def reset_graphable(
         self,
@@ -192,6 +198,8 @@ class RigidObjectCollection(BaseRigidObjectCollection):
         object_ids: slice | torch.Tensor | None = None,
         env_mask: wp.array | None = None,
         object_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
     ) -> None:
         """Commit Python-side reset state after graph replay."""
 

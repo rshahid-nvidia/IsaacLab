@@ -642,6 +642,8 @@ class WrenchComposer:
         self,
         env_ids: wp.array | torch.Tensor | Sequence[int] | slice | None = None,
         env_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
     ) -> None:
         """Commit Python-side reset state after a captured reset replay."""
 

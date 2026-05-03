@@ -41,7 +41,7 @@ class _FallbackResetEntity:
     def reset_graphable(self, env_ids=None, env_mask=None):
         pass
 
-    def reset_after_graph(self, env_ids=None, env_mask=None):
+    def reset_after_graph(self, env_ids=None, env_mask=None, *, graphable_reset_applied=False):
         self.reset(env_ids)
 
     def reset_graph_tensors(self):
@@ -59,8 +59,8 @@ class _GraphAwareResetEntity:
     def reset_graphable(self, env_ids=None, env_mask=None):
         self.log.append(("graph.graphable", env_ids, env_mask))
 
-    def reset_after_graph(self, env_ids=None, env_mask=None):
-        self.log.append(("graph.after_graph", env_ids, env_mask))
+    def reset_after_graph(self, env_ids=None, env_mask=None, *, graphable_reset_applied=False):
+        self.log.append(("graph.after_graph", env_ids, env_mask, graphable_reset_applied))
 
     def reset_graph_tensors(self):
         return {"tensor": self.tensor}
@@ -365,7 +365,7 @@ def test_scene_reset_with_env_mask_composes_each_entity_split_in_order():
     ]
     assert log[0][1] is env_ids
     assert log[1][1] is env_ids and log[1][2] is env_mask
-    assert log[2][1] is env_ids and log[2][2] is env_mask
+    assert log[2][1] is env_ids and log[2][2] is env_mask and log[2][3] is True
 
 
 def test_scene_reset_graphable_only_skips_unsupported_entities():
@@ -403,12 +403,12 @@ def test_scene_graph_capture_split_batches_graphable_before_residual():
     scene._sensors = {}
 
     scene.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-    scene.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+    scene.reset_after_graph(env_ids=env_ids, env_mask=env_mask, graphable_reset_applied=True)
 
     assert [entry[0] for entry in log] == ["graph.graphable", "fallback.reset", "graph.after_graph"]
     assert log[0][1] is env_ids and log[0][2] is env_mask
     assert log[1][1] is env_ids
-    assert log[2][1] is env_ids and log[2][2] is env_mask
+    assert log[2][1] is env_ids and log[2][2] is env_mask and log[2][3] is True
 
 
 def test_scene_reset_graph_tensors_prefixes_entity_names():

@@ -137,7 +137,6 @@ class Camera(SensorBase):
         self._renderer: BaseRenderer | None = None
         self._render_data = None
         self._opengl_to_world_rotation: torch.Tensor | None = None
-        self._camera_reset_graphable_active = False
 
     def _register_renderer_scene_data_requirements(self) -> None:
         """Register renderer requirements early enough for clone-time prebuilds."""
@@ -364,7 +363,6 @@ class Camera(SensorBase):
             raise RuntimeError(
                 "Camera could not be initialized. Please ensure --enable_cameras is used to enable rendering."
             )
-        self._camera_reset_graphable_active = False
         # reset the timestamps
         super().reset(env_ids, env_mask)
         # resolve to indices for torch indexing
@@ -391,20 +389,23 @@ class Camera(SensorBase):
                 "Camera could not be initialized. Please ensure --enable_cameras is used to enable rendering."
             )
         if env_mask is not None and self._supports_graphable_camera_reset():
-            self._camera_reset_graphable_active = True
             env_mask = super().reset_graphable(env_ids=None, env_mask=env_mask)
             self._update_poses_graphable(env_mask)
             self._frame.masked_fill_(wp.to_torch(env_mask), 0)
             return env_mask
 
-        self._camera_reset_graphable_active = False
         return super().reset_graphable(env_ids=env_ids, env_mask=env_mask)
 
-    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+    def reset_after_graph(
+        self,
+        env_ids: Sequence[int] | None = None,
+        env_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
+    ) -> None:
         """Run camera reset residual work that remains outside graph replay."""
 
-        if self._camera_reset_graphable_active:
-            self._camera_reset_graphable_active = False
+        if graphable_reset_applied and self._supports_graphable_camera_reset():
             return
         self.reset(env_ids=env_ids, env_mask=env_mask)
 

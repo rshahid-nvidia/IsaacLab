@@ -246,7 +246,13 @@ class Articulation(BaseArticulation):
         self._instantaneous_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         self._permanent_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
 
-    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+    def reset_after_graph(
+        self,
+        env_ids: Sequence[int] | None = None,
+        env_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
+    ) -> None:
         """Run reset work that remains outside CUDA graph replay."""
 
         self._reset_actuators(env_ids=env_ids, env_mask=env_mask)

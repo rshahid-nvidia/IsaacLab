@@ -22,3 +22,5 @@ Changed
 * Changed :meth:`~isaaclab.utils.WrenchComposer.reset_graphable` to update only
   graph-capturable tensor state. Call :meth:`~isaaclab.utils.WrenchComposer.reset_after_graph`
   after replay when Python-side wrench flags must be updated.
+* Changed reset residual hooks to receive an explicit ``graphable_reset_applied``
+  flag so CUDA graph replay paths do not rely on Python state mutated during capture.

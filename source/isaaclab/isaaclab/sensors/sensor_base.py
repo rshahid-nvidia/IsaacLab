@@ -192,7 +192,13 @@ class SensorBase(ABC):
 
         return self._reset_base_buffers(env_ids=env_ids, env_mask=env_mask)
 
-    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+    def reset_after_graph(
+        self,
+        env_ids: Sequence[int] | None = None,
+        env_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
+    ) -> None:
         """Run reset work that remains outside CUDA graph replay.
 
         The base sensor reset is graphable. Sensors with additional reset behavior that is not graph-capturable should
@@ -201,6 +207,13 @@ class SensorBase(ABC):
         :meth:`reset`; a plain :class:`SensorBase` implementation has no residual work after :meth:`reset_graphable`.
         Residual hooks may run after graphable reset work for every scene entity has replayed, so they must not rely on
         reading another entity's freshly-reset GPU state.
+
+        Args:
+            env_ids: Environment ids selected for reset.
+            env_mask: Environment mask selected for reset.
+            graphable_reset_applied: Whether the paired graphable reset phase has already run for this reset. The base
+                fallback still calls legacy full-reset overrides because it cannot know whether a subclass reset is
+                fully covered by graphable work.
         """
 
         if type(self).reset is SensorBase.reset:

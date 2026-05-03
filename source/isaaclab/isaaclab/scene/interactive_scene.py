@@ -489,23 +489,23 @@ class InteractiveScene:
             # -- assets
             for articulation in self._articulations.values():
                 articulation.reset_graphable(**kwargs)
-                articulation.reset_after_graph(**kwargs)
+                articulation.reset_after_graph(**kwargs, graphable_reset_applied=True)
             for deformable_object in self._deformable_objects.values():
                 deformable_object.reset_graphable(**kwargs)
-                deformable_object.reset_after_graph(**kwargs)
+                deformable_object.reset_after_graph(**kwargs, graphable_reset_applied=True)
             for rigid_object in self._rigid_objects.values():
                 rigid_object.reset_graphable(**kwargs)
-                rigid_object.reset_after_graph(**kwargs)
+                rigid_object.reset_after_graph(**kwargs, graphable_reset_applied=True)
             for surface_gripper in self._surface_grippers.values():
                 surface_gripper.reset_graphable(**kwargs)
-                surface_gripper.reset_after_graph(**kwargs)
+                surface_gripper.reset_after_graph(**kwargs, graphable_reset_applied=True)
             for rigid_object_collection in self._rigid_object_collections.values():
                 rigid_object_collection.reset_graphable(**kwargs)
-                rigid_object_collection.reset_after_graph(**kwargs)
+                rigid_object_collection.reset_after_graph(**kwargs, graphable_reset_applied=True)
             # -- sensors
             for sensor in self._sensors.values():
                 sensor.reset_graphable(**kwargs)
-                sensor.reset_after_graph(**kwargs)
+                sensor.reset_after_graph(**kwargs, graphable_reset_applied=True)
 
     def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
         """Launch graph-capturable scene reset work for entities that support it.
@@ -532,30 +532,43 @@ class InteractiveScene:
         for sensor in self._sensors.values():
             sensor.reset_graphable(**kwargs)
 
-    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+    def reset_after_graph(
+        self,
+        env_ids: Sequence[int] | None = None,
+        env_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
+    ) -> None:
         """Run scene reset work that remains outside CUDA graph replay.
 
         This is the residual phase paired with :meth:`reset_graphable`. It intentionally runs after all graphable scene
         work has replayed, unlike :meth:`reset(env_mask=...)`, which composes graphable and residual work per entity to
         preserve full-reset semantics outside graph capture.
+
+        Args:
+            env_ids: Environment ids selected for reset.
+            env_mask: Environment mask selected for reset.
+            graphable_reset_applied: Whether the paired scene graphable phase has already run for this reset. CUDA
+                graph replay callers must pass ``True`` because Python-side flags set inside :meth:`reset_graphable` do
+                not run again when a graph is replayed.
         """
 
         kwargs = ResetSelection(env_ids=env_ids, env_mask=env_mask).graph_kwargs()
 
         # -- assets
         for articulation in self._articulations.values():
-            articulation.reset_after_graph(**kwargs)
+            articulation.reset_after_graph(**kwargs, graphable_reset_applied=graphable_reset_applied)
         for deformable_object in self._deformable_objects.values():
-            deformable_object.reset_after_graph(**kwargs)
+            deformable_object.reset_after_graph(**kwargs, graphable_reset_applied=graphable_reset_applied)
         for rigid_object in self._rigid_objects.values():
-            rigid_object.reset_after_graph(**kwargs)
+            rigid_object.reset_after_graph(**kwargs, graphable_reset_applied=graphable_reset_applied)
         for surface_gripper in self._surface_grippers.values():
-            surface_gripper.reset_after_graph(**kwargs)
+            surface_gripper.reset_after_graph(**kwargs, graphable_reset_applied=graphable_reset_applied)
         for rigid_object_collection in self._rigid_object_collections.values():
-            rigid_object_collection.reset_after_graph(**kwargs)
+            rigid_object_collection.reset_after_graph(**kwargs, graphable_reset_applied=graphable_reset_applied)
         # -- sensors
         for sensor in self._sensors.values():
-            sensor.reset_after_graph(**kwargs)
+            sensor.reset_after_graph(**kwargs, graphable_reset_applied=graphable_reset_applied)
 
     def reset_graph_tensors(self) -> dict[str, torch.Tensor | wp.array]:
         """Return tensors and Warp arrays captured by graph-aware scene reset work."""

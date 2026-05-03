@@ -543,7 +543,7 @@ class TestArticulationReset:
             def reset_graphable(self, env_ids=None, env_mask=None):
                 pass
 
-            def reset_after_graph(self, env_ids=None, env_mask=None):
+            def reset_after_graph(self, env_ids=None, env_mask=None, *, graphable_reset_applied=False):
                 pass
 
         art.actuators = {"fake": _FakeActuator()}
@@ -576,7 +576,7 @@ class TestArticulationReset:
             def reset_graphable(self, env_ids=None, env_mask=None):
                 pass
 
-            def reset_after_graph(self, env_ids=None, env_mask=None):
+            def reset_after_graph(self, env_ids=None, env_mask=None, *, graphable_reset_applied=False):
                 pass
 
         art.actuators = {"fake": _FakeActuator()}
@@ -606,7 +606,7 @@ class TestArticulationReset:
             def reset_graphable(self, env_ids=None, env_mask=None):
                 composer_calls.append(("graphable", env_ids, env_mask))
 
-            def reset_after_graph(self, env_ids=None, env_mask=None):
+            def reset_after_graph(self, env_ids=None, env_mask=None, *, graphable_reset_applied=False):
                 composer_calls.append(("after_graph", env_ids, env_mask))
 
         art.actuators = {"fake": _FakeActuator()}

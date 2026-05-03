@@ -699,6 +699,10 @@ def test_reset_cuda_graph_runs_scene_reset_for_vision_sensors(monkeypatch):
 
             monkeypatch.setattr(camera, "reset", _unexpected_camera_reset)
 
+            # Run through two timeout resets. The first reset captures and replays the graph, while the second reset
+            # proves the camera residual hook is driven by the explicit replay contract instead of capture-time Python
+            # state mutated by Camera.reset_graphable().
+            obs, reward, time_outs, extras = _step_until_all_envs_timeout(gym_env)
             obs, reward, time_outs, extras = _step_until_all_envs_timeout(gym_env)
 
             assert "tiled_camera" in env.scene.sensors
@@ -748,7 +752,7 @@ def test_newton_camera_reset_graphable_matches_full_reset():
 
             _dirty_camera_reset_state(camera)
             camera.reset_graphable(env_ids=None, env_mask=reset_mask_wp)
-            camera.reset_after_graph(env_ids=reset_env_ids, env_mask=None)
+            camera.reset_after_graph(env_ids=reset_env_ids, env_mask=None, graphable_reset_applied=True)
             torch.cuda.synchronize()
             graphable = _snapshot_camera_reset_state(camera)
 
@@ -2105,9 +2109,11 @@ def test_reset_cuda_graph_step_uses_mask_before_materializing_env_ids(monkeypatc
                 calls.append(("materialize", ctx.env_ids is None))
                 return original_materialize(ctx)
 
-            def _record_scene_reset_after_graph(env_ids=None, env_mask=None):
-                scene_after_graph_calls.append((env_ids, env_mask))
-                return original_scene_reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            def _record_scene_reset_after_graph(env_ids=None, env_mask=None, *, graphable_reset_applied=False):
+                scene_after_graph_calls.append((env_ids, env_mask, graphable_reset_applied))
+                return original_scene_reset_after_graph(
+                    env_ids=env_ids, env_mask=env_mask, graphable_reset_applied=graphable_reset_applied
+                )
 
             monkeypatch.setattr(env, "_try_reset_idx_cuda_graph", _record_try_cuda_graph_reset)
             monkeypatch.setattr(env, "_materialize_reset_context_env_ids", _record_materialize)
@@ -2120,6 +2126,7 @@ def test_reset_cuda_graph_step_uses_mask_before_materializing_env_ids(monkeypatc
             assert calls[1] == ("materialize", True)
             assert len(scene_after_graph_calls) == 1
             assert scene_after_graph_calls[0][1] is None
+            assert scene_after_graph_calls[0][2] is True
             assert env._reset_cuda_graph_enabled
             torch.testing.assert_close(env.episode_length_buf, torch.zeros_like(env.episode_length_buf))
         finally:
@@ -2176,9 +2183,11 @@ def test_reset_cuda_graph_orders_common_residual_before_task_apply_graph(monkeyp
                 order.append("common_after")
                 return original_common_after(ctx, reset_episode_lengths=reset_episode_lengths)
 
-            def _record_scene_reset_after_graph(env_ids=None, env_mask=None):
-                scene_after_graph_calls.append((env_ids, env_mask))
-                return original_scene_reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+            def _record_scene_reset_after_graph(env_ids=None, env_mask=None, *, graphable_reset_applied=False):
+                scene_after_graph_calls.append((env_ids, env_mask, graphable_reset_applied))
+                return original_scene_reset_after_graph(
+                    env_ids=env_ids, env_mask=env_mask, graphable_reset_applied=graphable_reset_applied
+                )
 
             def _record_noise_reset(env_ids=None):
                 order.append("noise")
@@ -2226,6 +2235,7 @@ def test_reset_cuda_graph_orders_common_residual_before_task_apply_graph(monkeyp
             assert len(scene_after_graph_calls) == 1
             torch.testing.assert_close(scene_after_graph_calls[0][0], reset_env_ids)
             assert scene_after_graph_calls[0][1] is None
+            assert scene_after_graph_calls[0][2] is True
             _assert_intermediates_match_canonical_recompute(env)
         finally:
             gym_env.close()
@@ -2782,9 +2792,11 @@ def test_inhand_reset_idx_runs_base_reset_before_fused_warp_body(monkeypatch):
                 env._test_reset_order.append("prepare")
                 return original_prepare(ctx)
 
-            def _record_scene_reset_after_graph(env_ids=None, env_mask=None):
+            def _record_scene_reset_after_graph(env_ids=None, env_mask=None, *, graphable_reset_applied=False):
                 env._test_reset_order.append("scene")
-                return original_scene_reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+                return original_scene_reset_after_graph(
+                    env_ids=env_ids, env_mask=env_mask, graphable_reset_applied=graphable_reset_applied
+                )
 
             def _record_noise_reset(env_ids=None):
                 env._test_reset_order.append("noise")

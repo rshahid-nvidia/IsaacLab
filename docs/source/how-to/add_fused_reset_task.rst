@@ -80,12 +80,17 @@ Residual Ordering Rule
 Split reset support lets each scene entity implement:
 
 * ``reset_graphable(env_ids=None, env_mask=None)`` for graph-capturable tensor/kernel work.
-* ``reset_after_graph(env_ids=None, env_mask=None)`` for Python-side residual state.
+* ``reset_after_graph(env_ids=None, env_mask=None, graphable_reset_applied=False)`` for Python-side residual state.
 
 The scene runs graphable work for all entities before residual work. Therefore, a residual hook must not read another
 entity's freshly reset GPU state unless that dependency is captured in an earlier ordered phase. When ordering matters,
 use separate :class:`~isaaclab.envs.cuda_graph.ResetGraphPhase` objects and place the residual hook in
 ``between_hook``.
+
+Residual hooks must use the explicit ``graphable_reset_applied`` argument rather than Python state mutated by
+``reset_graphable(...)``. Python in ``reset_graphable(...)`` runs during warm-up and capture, but it does not run on CUDA
+graph replay. A hook that needs to skip a legacy full reset because its graphable work already replayed should check
+``graphable_reset_applied``.
 
 Camera and Renderer Reset
 -------------------------

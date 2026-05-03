@@ -235,13 +235,25 @@ class AssetBase(ABC):
         capturable tensor/kernel work here and keep :meth:`reset` as the full semantic reset.
         """
 
-    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+    def reset_after_graph(
+        self,
+        env_ids: Sequence[int] | None = None,
+        env_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
+    ) -> None:
         """Run reset work that remains outside CUDA graph replay.
 
         Unsupported assets fall back to their existing full reset implementation. Because that legacy reset API is
         env-id based, callers that use this default fallback must pass concrete ``env_ids``; a mask-only reset requires
         the asset to override this method. Residual hooks may run after graphable reset work for every scene entity has
         replayed, so they must not rely on reading another entity's freshly-reset GPU state.
+
+        Args:
+            env_ids: The indices of the object to reset. Defaults to None (all instances).
+            env_mask: A boolean Warp array indicating which environments were selected by graphable reset work.
+            graphable_reset_applied: Whether the paired graphable reset phase has already run for this reset. The base
+                fallback ignores this flag because it has no graphable work of its own.
         """
 
         if env_ids is None and env_mask is not None:

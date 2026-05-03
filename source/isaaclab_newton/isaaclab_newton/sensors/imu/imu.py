@@ -96,7 +96,7 @@ class Imu(BaseImu):
             env_mask: Boolean mask of environments to reset. Mutually exclusive with *env_ids*.
         """
         self.reset_graphable(env_ids=env_ids, env_mask=env_mask)
-        self.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
+        self.reset_after_graph(env_ids=env_ids, env_mask=env_mask, graphable_reset_applied=True)
 
     def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None):
         """Launch graph-capturable reset work."""
@@ -109,7 +109,13 @@ class Imu(BaseImu):
             device=self._device,
         )
 
-    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None):
+    def reset_after_graph(
+        self,
+        env_ids: Sequence[int] | None = None,
+        env_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
+    ):
         """Run reset work that remains outside CUDA graph replay."""
 
     def reset_graph_tensors(self) -> dict[str, wp.array]:

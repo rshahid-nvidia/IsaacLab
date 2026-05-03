@@ -284,7 +284,7 @@ class TestRigidObjectReset:
             def reset_graphable(self, env_ids=None, env_mask=None):
                 composer_calls.append(("graphable", env_ids, env_mask))
 
-            def reset_after_graph(self, env_ids=None, env_mask=None):
+            def reset_after_graph(self, env_ids=None, env_mask=None, *, graphable_reset_applied=False):
                 composer_calls.append(("after_graph", env_ids, env_mask))
 
         rigid_object._instantaneous_wrench_composer = _FakeComposer()

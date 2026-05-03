@@ -128,7 +128,7 @@ class RigidObject(BaseRigidObject):
         """
         reset_env_ids = slice(None) if env_ids is None and env_mask is None else env_ids
         self.reset_graphable(env_ids=reset_env_ids, env_mask=env_mask)
-        self.reset_after_graph(env_ids=reset_env_ids, env_mask=env_mask)
+        self.reset_after_graph(env_ids=reset_env_ids, env_mask=env_mask, graphable_reset_applied=True)
 
     def reset_graphable(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
         """Launch graph-capturable reset work."""
@@ -136,7 +136,13 @@ class RigidObject(BaseRigidObject):
         self._instantaneous_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
         self._permanent_wrench_composer.reset_graphable(env_ids=env_ids, env_mask=env_mask)
 
-    def reset_after_graph(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+    def reset_after_graph(
+        self,
+        env_ids: Sequence[int] | None = None,
+        env_mask: wp.array | None = None,
+        *,
+        graphable_reset_applied: bool = False,
+    ) -> None:
         """Commit Python-side reset state after graph replay."""
 
         self._instantaneous_wrench_composer.reset_after_graph(env_ids=env_ids, env_mask=env_mask)
