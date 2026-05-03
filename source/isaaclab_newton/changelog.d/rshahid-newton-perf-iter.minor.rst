@@ -7,6 +7,8 @@ Added
   :class:`~isaaclab_newton.assets.RigidObjectCollection`, and Newton sensor reset paths.
 * Added mask-native Newton reset writer hooks for graph-capturable in-hand manipulation
   reset paths.
+* Added :meth:`isaaclab_newton.renderers.NewtonWarpRenderer.supports_camera_reset_graphable`
+  so Newton renderer camera pose reset can participate in task-level reset CUDA graph replay.
 
 Changed
 ^^^^^^^

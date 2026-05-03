@@ -13,6 +13,8 @@ Added
   :mod:`isaaclab.utils.warp_view_registry`.
 * Added :class:`~isaaclab.envs.DirectRLEnv` hooks for replaying ordered reset CUDA graph
   phases from task-specific fused reset paths.
+* Added graphable reset support for :class:`~isaaclab.sensors.Camera` when the renderer
+  and camera view provide stable graph-capturable reset buffers.
 
 Changed
 ^^^^^^^

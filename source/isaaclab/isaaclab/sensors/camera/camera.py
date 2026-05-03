@@ -404,6 +404,7 @@ class Camera(SensorBase):
         """Run camera reset residual work that remains outside graph replay."""
 
         if self._camera_reset_graphable_active:
+            self._camera_reset_graphable_active = False
             return
         self.reset(env_ids=env_ids, env_mask=env_mask)
 
