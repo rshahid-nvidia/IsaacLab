@@ -173,8 +173,15 @@ class NewtonWarpRenderer(BaseRenderer):
                 enable_textures=cfg.enable_textures,
                 enable_shadows=cfg.enable_shadows,
                 enable_ambient_lighting=cfg.enable_ambient_lighting,
+                enable_global_world=cfg.enable_global_world,
+                enable_particles=cfg.enable_particles,
                 enable_backface_culling=cfg.enable_backface_culling,
+                render_order=cfg.render_order,
+                tile_width=cfg.tile_width,
+                tile_height=cfg.tile_height,
                 max_distance=cfg.max_distance,
+                block_dim=cfg.block_dim,
+                mesh_bvh_constructor=cfg.mesh_bvh_constructor,
             ),
         )
 

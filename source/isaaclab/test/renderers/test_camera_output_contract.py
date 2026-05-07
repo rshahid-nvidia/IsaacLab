@@ -134,6 +134,74 @@ def test_newton_warp_supported_output_types_key_set():
     }
 
 
+def test_newton_warp_renderer_cfg_defaults_to_tuned_block_dim():
+    """NewtonWarpRendererCfg uses the tuned render megakernel launch size by default."""
+    pytest.importorskip("isaaclab_newton")
+    from isaaclab_newton.renderers.newton_warp_renderer_cfg import NewtonWarpRendererCfg
+
+    assert NewtonWarpRendererCfg().block_dim == 128
+
+
+def test_newton_warp_renderer_requires_newton_render_config_block_dim():
+    """The Newton Warp renderer branch requires Newton RenderConfig.block_dim support."""
+    pytest.importorskip("isaaclab_newton")
+    pytest.importorskip("newton")
+    import newton
+    from isaaclab_newton.renderers.newton_warp_renderer_cfg import NewtonWarpRendererCfg
+
+    render_config_fields = getattr(newton.sensors.SensorTiledCamera.RenderConfig, "__dataclass_fields__", {})
+    assert "block_dim" in render_config_fields
+
+    render_config = newton.sensors.SensorTiledCamera.RenderConfig(
+        block_dim=NewtonWarpRendererCfg(block_dim=64).block_dim
+    )
+    assert render_config.block_dim == 64
+
+
+def test_newton_warp_renderer_forwards_mesh_bvh_constructor():
+    """NewtonWarpRendererCfg exposes the render-only mesh BVH constructor knob."""
+    pytest.importorskip("isaaclab_newton")
+    pytest.importorskip("newton")
+    import newton
+    from isaaclab_newton.renderers.newton_warp_renderer_cfg import NewtonWarpRendererCfg
+
+    render_config_fields = getattr(newton.sensors.SensorTiledCamera.RenderConfig, "__dataclass_fields__", {})
+    assert "mesh_bvh_constructor" in render_config_fields
+
+    render_config = newton.sensors.SensorTiledCamera.RenderConfig(
+        mesh_bvh_constructor=NewtonWarpRendererCfg(mesh_bvh_constructor="cubql").mesh_bvh_constructor
+    )
+    assert render_config.mesh_bvh_constructor == "cubql"
+
+
+def test_newton_warp_renderer_forwards_render_specialization_knobs():
+    """NewtonWarpRendererCfg exposes existing Newton RenderConfig specialization knobs."""
+    pytest.importorskip("isaaclab_newton")
+    pytest.importorskip("newton")
+    import newton
+    from isaaclab_newton.renderers.newton_warp_renderer_cfg import NewtonWarpRendererCfg
+
+    cfg = NewtonWarpRendererCfg(
+        enable_global_world=False,
+        enable_particles=False,
+        render_order=2,
+        tile_width=8,
+        tile_height=8,
+    )
+    render_config = newton.sensors.SensorTiledCamera.RenderConfig(
+        enable_global_world=cfg.enable_global_world,
+        enable_particles=cfg.enable_particles,
+        render_order=cfg.render_order,
+        tile_width=cfg.tile_width,
+        tile_height=cfg.tile_height,
+    )
+    assert render_config.enable_global_world is False
+    assert render_config.enable_particles is False
+    assert render_config.render_order == 2
+    assert render_config.tile_width == 8
+    assert render_config.tile_height == 8
+
+
 def _make_camera_cfg(data_types: list[str]) -> CameraCfg:
     return CameraCfg(
         height=8,
