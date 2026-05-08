@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +29,43 @@ if TYPE_CHECKING:
     from isaaclab.sensors.camera.camera_data import CameraData
 
 logger = logging.getLogger(__name__)
+
+
+def _is_newton_render_megakernel(kernel: Any) -> bool:
+    """Return True for Newton's dynamically-created raytrace render megakernel."""
+    if getattr(kernel, "__name__", None) == "render_megakernel":
+        return True
+    if "render_megakernel" in str(getattr(kernel, "key", "")):
+        return True
+
+    kernel_func = getattr(kernel, "func", None)
+    return getattr(kernel_func, "__name__", None) == "render_megakernel"
+
+
+@contextmanager
+def _newton_render_block_dim_launch_patch(block_dim: int) -> Iterator[None]:
+    """Temporarily inject ``block_dim`` into Newton's renderer megakernel launch."""
+    if block_dim <= 0:
+        yield
+        return
+
+    original_launch = wp.launch
+
+    def launch_with_render_block_dim(*args, **kwargs):
+        kernel = kwargs.get("kernel")
+        if kernel is None and args:
+            kernel = args[0]
+
+        if _is_newton_render_megakernel(kernel) and "block_dim" not in kwargs:
+            kwargs["block_dim"] = block_dim
+
+        return original_launch(*args, **kwargs)
+
+    wp.launch = launch_with_render_block_dim
+    try:
+        yield
+    finally:
+        wp.launch = original_launch
 
 
 class RenderData:
@@ -220,18 +259,19 @@ class NewtonWarpRenderer(BaseRenderer):
 
     def render(self, render_data: RenderData):
         """Render and write to output buffers. See :meth:`~isaaclab.renderers.base_renderer.BaseRenderer.render`."""
-        self.newton_sensor.update(
-            self.get_scene_data_provider().get_newton_state(),
-            render_data.camera_transforms,
-            render_data.camera_rays,
-            color_image=render_data.outputs.color_image,
-            albedo_image=render_data.outputs.albedo_image,
-            depth_image=render_data.outputs.depth_image,
-            normal_image=render_data.outputs.normals_image,
-            shape_index_image=render_data.outputs.instance_segmentation_image,
-            # ARGB 93% gray to improve visibility of dark objects and align with RTX renderer background
-            clear_data=newton.sensors.SensorTiledCamera.ClearData(clear_color=0xFFEEEEEE),
-        )
+        with _newton_render_block_dim_launch_patch(self.cfg.block_dim):
+            self.newton_sensor.update(
+                self.get_scene_data_provider().get_newton_state(),
+                render_data.camera_transforms,
+                render_data.camera_rays,
+                color_image=render_data.outputs.color_image,
+                albedo_image=render_data.outputs.albedo_image,
+                depth_image=render_data.outputs.depth_image,
+                normal_image=render_data.outputs.normals_image,
+                shape_index_image=render_data.outputs.instance_segmentation_image,
+                # ARGB 93% gray to improve visibility of dark objects and align with RTX renderer background
+                clear_data=newton.sensors.SensorTiledCamera.ClearData(clear_color=0xFFEEEEEE),
+            )
 
     def read_output(self, render_data: RenderData, camera_data: CameraData) -> None:
         """Copy rendered outputs to the camera data buffers.

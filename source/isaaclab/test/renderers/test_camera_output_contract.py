@@ -134,6 +134,44 @@ def test_newton_warp_supported_output_types_key_set():
     }
 
 
+def test_newton_warp_renderer_cfg_exposes_block_dim_without_changing_default():
+    """NewtonWarpRendererCfg exposes the IsaacLab-only block_dim test knob."""
+    pytest.importorskip("isaaclab_newton")
+    from isaaclab_newton.renderers.newton_warp_renderer_cfg import NewtonWarpRendererCfg
+
+    assert NewtonWarpRendererCfg().block_dim == 0
+    assert NewtonWarpRendererCfg(block_dim=64).block_dim == 64
+
+
+def test_newton_warp_block_dim_patch_only_targets_render_megakernel(monkeypatch):
+    """The monkey patch injects block_dim only into Newton's render megakernel launch."""
+    pytest.importorskip("isaaclab_newton")
+    pytest.importorskip("newton")
+    from isaaclab_newton.renderers import newton_warp_renderer
+
+    calls = []
+
+    def fake_launch(*args, **kwargs):
+        calls.append((args, kwargs.copy()))
+
+    class RenderKernel:
+        __name__ = "render_megakernel"
+
+    class OtherKernel:
+        __name__ = "compute_bounds"
+
+    monkeypatch.setattr(newton_warp_renderer.wp, "launch", fake_launch)
+
+    with newton_warp_renderer._newton_render_block_dim_launch_patch(64):
+        newton_warp_renderer.wp.launch(RenderKernel(), dim=1)
+        newton_warp_renderer.wp.launch(OtherKernel(), dim=1)
+        newton_warp_renderer.wp.launch(RenderKernel(), dim=1, block_dim=32)
+
+    assert calls[0][1]["block_dim"] == 64
+    assert "block_dim" not in calls[1][1]
+    assert calls[2][1]["block_dim"] == 32
+
+
 def _make_camera_cfg(data_types: list[str]) -> CameraCfg:
     return CameraCfg(
         height=8,

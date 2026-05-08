@@ -31,6 +31,14 @@ class NewtonWarpRendererCfg(RendererCfg):
     max_distance: float = 1000.0
     """Maximum ray distance [m]."""
 
+    block_dim: int = 0
+    """Thread block size for the Newton Warp renderer megakernel.
+
+    A value of ``0`` preserves Newton/Warp's default launch configuration. Positive values are applied by IsaacLab
+    through a scoped monkey patch around the Newton renderer update call, so this knob does not require a patched
+    Newton install.
+    """
+
     create_default_light: bool = True
     """Create a default directional light source in the scene."""
 
