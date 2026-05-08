@@ -78,6 +78,31 @@ Dexsuite Kuka Allegro:
 
 Repeat each command with `block_dim=0`, `64`, and `128` for the sweep.
 
+## Run the Full Sweep Script
+
+This branch also includes a one-shot sweep script for the three camera workloads:
+
+```bash
+./scripts/benchmarks/sweep_newton_renderer_block_dim.py
+```
+
+By default it runs:
+
+- tasks: Dexsuite Kuka Allegro Lift, Shadow vision benchmark, Cartpole camera presets
+- `num_envs`: `1024 2048 4096 8192`
+- `block_dim`: `64 128 256`
+- frames per run: `100`
+
+The script writes per-run benchmark JSON files plus a live-updated summary at:
+
+```text
+hdc/benchmarks/newton_renderer_block_dim_sweep_<timestamp>/summary.json
+```
+
+Dexsuite uses `presets=cube,single_camera,newton,newton_renderer,rgb64` because its camera presets are
+resolution-specific and the scene camera must be explicitly enabled. Shadow and Cartpole use
+`presets=newton,newton_renderer,rgb`.
+
 ## Optional NSYS Trace
 
 ```bash
