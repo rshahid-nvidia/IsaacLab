@@ -41,6 +41,13 @@ PY
 `block_dim=0` preserves Newton/Warp's default launch configuration. Positive values such as `64` or `128` are injected
 into the renderer megakernel launch.
 
+This branch also exposes Newton's render traversal knobs:
+
+- `renderer_cfg.render_order=0`: `PIXEL_PRIORITY` traversal, Newton's default.
+- `renderer_cfg.render_order=2`: `TILED` traversal.
+- `renderer_cfg.tile_width=<N>` / `renderer_cfg.tile_height=<N>`: tile size for `TILED`; both must divide the camera
+  resolution exactly.
+
 ## Benchmark Commands
 
 Shadow vision:
@@ -102,6 +109,48 @@ hdc/benchmarks/newton_renderer_block_dim_sweep_<timestamp>/summary.json
 Dexsuite uses `presets=cube,single_camera,newton,newton_renderer,rgb64` because its camera presets are
 resolution-specific and the scene camera must be explicitly enabled. Shadow and Cartpole use
 `presets=newton,newton_renderer,rgb`.
+
+## Run the Render-Order / Tile-Size Sweep Script
+
+To compare `PIXEL_PRIORITY` against `TILED` while also sweeping `block_dim`, tile width, tile height, and Dexsuite
+camera resolution:
+
+```bash
+./scripts/benchmarks/sweep_newton_renderer_render_order_tiles.py
+```
+
+By default it runs:
+
+- Dexsuite Kuka Allegro Lift with `rgb64`, `rgb128`, and `rgb256`
+- Shadow vision RGB and Cartpole camera RGB
+- `num_envs`: `1024 2048 4096 8192`
+- `block_dim`: `64 128 256`
+- render orders: `pixel_priority tiled`
+- tile pairs: `8x8 10x10 16x8 16x16 20x10 20x20 25x25 32x32 40x40 64x64`
+- frames per run: `100`
+
+Invalid tile sizes are recorded under `skipped_invalid_tiles` in the summary instead of being executed. For example,
+Cartpole's `100x100` camera skips `16x8` because `100 % 16 != 0`.
+
+If the existing `PIXEL_PRIORITY` sweep is already sufficient and you only want the tiled add-on:
+
+```bash
+./scripts/benchmarks/sweep_newton_renderer_render_order_tiles.py --render-orders tiled
+```
+
+To override the tile set:
+
+```bash
+./scripts/benchmarks/sweep_newton_renderer_render_order_tiles.py \
+    --render-orders tiled \
+    --tile-pairs 8x8 16x8 16x16 32x32
+```
+
+The script writes:
+
+```text
+hdc/benchmarks/newton_renderer_render_order_tile_sweep_<timestamp>/summary.json
+```
 
 ## Optional NSYS Trace
 

@@ -39,6 +39,19 @@ class NewtonWarpRendererCfg(RendererCfg):
     Newton install.
     """
 
+    render_order: int = 0
+    """Newton raytracer traversal order.
+
+    This is passed through to ``newton.sensors.SensorTiledCamera.RenderConfig.render_order``. Current Newton values are
+    ``0`` for ``PIXEL_PRIORITY``, ``1`` for ``VIEW_PRIORITY``, and ``2`` for ``TILED``.
+    """
+
+    tile_width: int = 16
+    """Tile width in pixels when ``render_order`` is ``TILED``."""
+
+    tile_height: int = 8
+    """Tile height in pixels when ``render_order`` is ``TILED``."""
+
     create_default_light: bool = True
     """Create a default directional light source in the scene."""
 

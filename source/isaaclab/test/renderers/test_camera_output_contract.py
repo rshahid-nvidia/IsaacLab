@@ -143,6 +143,22 @@ def test_newton_warp_renderer_cfg_exposes_block_dim_without_changing_default():
     assert NewtonWarpRendererCfg(block_dim=64).block_dim == 64
 
 
+def test_newton_warp_renderer_cfg_exposes_render_order_and_tile_size_defaults():
+    """NewtonWarpRendererCfg forwards Newton render traversal and tile-size knobs."""
+    pytest.importorskip("isaaclab_newton")
+    from isaaclab_newton.renderers.newton_warp_renderer_cfg import NewtonWarpRendererCfg
+
+    cfg = NewtonWarpRendererCfg()
+    assert cfg.render_order == 0
+    assert cfg.tile_width == 16
+    assert cfg.tile_height == 8
+
+    cfg = NewtonWarpRendererCfg(render_order=2, tile_width=10, tile_height=20)
+    assert cfg.render_order == 2
+    assert cfg.tile_width == 10
+    assert cfg.tile_height == 20
+
+
 def test_newton_warp_block_dim_patch_only_targets_render_megakernel(monkeypatch):
     """The monkey patch injects block_dim only into Newton's render megakernel launch."""
     pytest.importorskip("isaaclab_newton")
