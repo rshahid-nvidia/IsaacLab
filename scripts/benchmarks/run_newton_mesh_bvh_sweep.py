@@ -50,7 +50,7 @@ TASKS = {
 BACKENDS = {
     "default": {
         "label": "default BVH",
-        "override": "sim.physics.mesh_bvh_constructor=null",
+        "override": None,
     },
     "cubql": {
         "label": "cuBQL BVH",
@@ -73,8 +73,14 @@ def _extract_metric(benchmark_json: Path, measurement_suffix: str) -> float:
 
 
 def _find_benchmark_json(output_dir: Path, task_id: str) -> Path | None:
-    matches = sorted(output_dir.glob(f"benchmark_non_rl_{task_id}_*.json"))
+    matches = sorted(output_dir.rglob(f"benchmark_non_rl_{task_id}_*.json"))
     return matches[-1] if matches else None
+
+
+def _read_log_tail(log_path: Path, line_count: int = 80) -> str:
+    if not log_path.exists():
+        return ""
+    return "\n".join(log_path.read_text(errors="replace").splitlines()[-line_count:])
 
 
 def _run_one(
@@ -109,8 +115,9 @@ def _run_one(
         "--output_path",
         str(run_dir),
         f"presets={task.presets}",
-        backend["override"],
     ]
+    if backend["override"] is not None:
+        command.append(backend["override"])
 
     record: dict[str, Any] = {
         "task_name": task.name,
@@ -139,15 +146,22 @@ def _run_one(
     ended_at = datetime.now().isoformat(timespec="seconds")
 
     benchmark_json = _find_benchmark_json(run_dir, task.task_id)
+    status = "passed" if result.returncode == 0 and benchmark_json is not None else "failed"
     record.update(
         {
-            "status": "passed" if result.returncode == 0 and benchmark_json is not None else "failed",
+            "status": status,
             "returncode": result.returncode,
             "started_at": started_at,
             "ended_at": ended_at,
             "benchmark_json": str(benchmark_json) if benchmark_json else None,
         }
     )
+    if status == "failed":
+        if result.returncode != 0:
+            record["failure_reason"] = f"benchmark command exited with return code {result.returncode}"
+        else:
+            record["failure_reason"] = f"benchmark JSON not found under {run_dir}"
+        record["log_tail"] = _read_log_tail(log_path)
     if benchmark_json is not None:
         record["metrics"] = {
             "mean_environment_step_fps": _extract_metric(benchmark_json, "Mean Environment step FPS"),
@@ -400,6 +414,14 @@ def main() -> int:
     print(f"[OK] Summary: {summary_path}")
     if plot_paths:
         print(f"[OK] Plots: {output_root / 'plots'}")
+    if failed:
+        print(f"[FAIL] {len(failed)} run(s) failed. Inspect each run's log_path, failure_reason, and log_tail in summary.json.")
+        for run in failed[:8]:
+            print(
+                "[FAIL] "
+                f"{run['task_name']} envs={run['num_envs']} backend={run['backend']} "
+                f"reason={run.get('failure_reason', 'unknown')} log={run['log_path']}"
+            )
     return 1 if failed else 0
 
 
