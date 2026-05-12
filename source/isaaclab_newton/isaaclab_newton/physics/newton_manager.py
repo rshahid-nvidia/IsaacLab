@@ -516,6 +516,34 @@ class NewtonManager(PhysicsManager):
         return builder
 
     @classmethod
+    @contextlib.contextmanager
+    def _mesh_bvh_constructor_override(cls):
+        """Temporarily override Newton mesh BVH construction for experiment-only sweeps."""
+        cfg = PhysicsManager._cfg
+        constructor = cfg.mesh_bvh_constructor if isinstance(cfg, NewtonCfg) else None
+        if constructor is None:
+            yield
+            return
+
+        from newton import Mesh as NewtonMesh
+
+        original_finalize = NewtonMesh.finalize
+
+        def finalize_with_bvh_constructor(self, device=None, requires_grad: bool = False):
+            with wp.ScopedDevice(device):
+                pos = wp.array(self.vertices, requires_grad=requires_grad, dtype=wp.vec3)
+                vel = wp.zeros_like(pos)
+                indices = wp.array(self.indices, dtype=wp.int32)
+                self.mesh = wp.Mesh(points=pos, velocities=vel, indices=indices, bvh_constructor=constructor)
+                return self.mesh.id
+
+        NewtonMesh.finalize = finalize_with_bvh_constructor
+        try:
+            yield
+        finally:
+            NewtonMesh.finalize = original_finalize
+
+    @classmethod
     def cl_register_site(cls, body_pattern: str | None, xform: wp.transform) -> str:
         """Register a site request for injection into prototypes before replication.
 
@@ -755,7 +783,8 @@ class NewtonManager(PhysicsManager):
             cls._builder.request_state_attributes(*cls._pending_extended_state_attributes)
             NewtonManager._pending_extended_state_attributes = set()
         with Timer(name="newton_finalize_builder", msg="Finalize builder took:"):
-            NewtonManager._model = cls._builder.finalize(device=device)
+            with cls._mesh_bvh_constructor_override():
+                NewtonManager._model = cls._builder.finalize(device=device)
             cls._model.set_gravity(cls._gravity_vector)
             cls._model.num_envs = cls._num_envs
 

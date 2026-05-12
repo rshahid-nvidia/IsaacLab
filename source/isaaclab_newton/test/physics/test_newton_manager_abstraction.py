@@ -25,6 +25,9 @@ Covers:
 
 from __future__ import annotations
 
+from unittest import mock
+
+import numpy as np
 import pytest
 from isaaclab_newton.physics import (
     FeatherstoneSolverCfg,
@@ -40,8 +43,10 @@ from isaaclab_newton.physics import (
     NewtonXPBDManager,
     XPBDSolverCfg,
 )
+import newton
 from newton.solvers import SolverFeatherstone, SolverKamino, SolverMuJoCo, SolverXPBD
 
+from isaaclab.physics import PhysicsManager
 from isaaclab.sim import SimulationCfg, build_simulation_context
 
 # ---------------------------------------------------------------------------
@@ -132,6 +137,26 @@ def test_newton_cfg_post_init_propagates_class_type(
     """``NewtonCfg.__post_init__`` lifts ``solver_cfg.class_type`` onto ``NewtonCfg.class_type``."""
     cfg = NewtonCfg(solver_cfg=solver_cfg_factory())
     assert cfg.class_type.__name__ == expected_manager.__name__
+
+
+def test_mesh_bvh_constructor_override_forwards_to_warp_mesh(monkeypatch):
+    """The experiment-only mesh BVH override changes mesh finalization without Newton source changes."""
+    cfg = NewtonCfg(solver_cfg=MJWarpSolverCfg(), mesh_bvh_constructor="cubql")
+    monkeypatch.setattr(PhysicsManager, "_cfg", cfg)
+
+    mesh = newton.Mesh(
+        vertices=np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32),
+        indices=np.array([0, 1, 2], dtype=np.int32),
+        compute_inertia=False,
+    )
+
+    with mock.patch("newton._src.geometry.types.wp.Mesh") as wp_mesh:
+        wp_mesh.return_value.id = 123
+        with NewtonManager._mesh_bvh_constructor_override():
+            mesh_id = mesh.finalize(device="cpu")
+
+    assert mesh_id == 123
+    assert wp_mesh.call_args.kwargs["bvh_constructor"] == "cubql"
 
 
 # ---------------------------------------------------------------------------

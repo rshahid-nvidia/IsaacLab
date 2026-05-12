@@ -138,6 +138,13 @@ class NewtonCfg(PhysicsCfg):
     :class:`NewtonShapeCfg` for the declared fields.
     """
 
+    mesh_bvh_constructor: str | None = None
+    """Experimental Warp mesh BVH constructor override used when Newton finalizes triangle mesh shapes.
+
+    If ``None``, Isaac Lab does not override Newton's current default. Set to ``"cubql"`` to force cuBQL mesh
+    BVHs without requiring a Newton build that exposes this setting.
+    """
+
     def __post_init__(self):
         # NewtonCfg.class_type is auto-derived from solver_cfg.class_type.
         # Refuse a user-set value: setting both is ambiguous and was
