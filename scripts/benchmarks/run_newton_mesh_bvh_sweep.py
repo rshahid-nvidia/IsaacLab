@@ -7,7 +7,7 @@
 
 This is an experiment helper for comparing Newton/Warp's existing mesh BVH
 default against cuBQL without requiring a local Newton source change. The
-``cubql`` mode uses ``sim.physics.mesh_bvh_constructor=cubql``, which is handled
+``cubql`` mode uses ``env.sim.physics.mesh_bvh_constructor=cubql``, which is handled
 by the experiment-only IsaacLab monkey patch in ``NewtonManager``.
 """
 
@@ -37,13 +37,13 @@ TASKS = {
         name="dexsuite_kuka_allegro_lift_rgb64",
         title="Dexsuite Kuka Allegro Lift RGB64",
         task_id="Isaac-Dexsuite-Kuka-Allegro-Lift-v0",
-        presets="cube,single_camera,newton,newton_renderer,rgb64",
+        presets="cube,single_camera,newton_mjwarp,newton_renderer,rgb64",
     ),
     "shadow_vision_rgb": TaskSpec(
         name="shadow_vision_rgb",
         title="Shadow Vision RGB",
         task_id="Isaac-Repose-Cube-Shadow-Vision-Benchmark-Direct-v0",
-        presets="newton,newton_renderer,rgb",
+        presets="newton_mjwarp,newton_renderer,rgb",
     ),
 }
 
@@ -54,7 +54,7 @@ BACKENDS = {
     },
     "cubql": {
         "label": "cuBQL BVH",
-        "override": "sim.physics.mesh_bvh_constructor=cubql",
+        "override": "env.sim.physics.mesh_bvh_constructor=cubql",
     },
 }
 
