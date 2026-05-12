@@ -5,10 +5,11 @@
 
 """Run and plot an IsaacLab-only Newton mesh BVH backend sweep.
 
-This is an experiment helper for comparing Newton/Warp's existing mesh BVH
-default against cuBQL without requiring a local Newton source change. The
-``cubql`` mode uses ``env.sim.physics.mesh_bvh_constructor=cubql``, which is handled
-by the experiment-only IsaacLab monkey patch in ``NewtonManager``.
+This is an experiment helper for comparing Newton/Warp's default GPU mesh BVH
+backend (LBVH) against cuBQL without requiring a local Newton source change.
+The backend overrides use ``env.sim.physics.mesh_bvh_constructor=<name>``,
+which is handled by the experiment-only IsaacLab monkey patch in
+``NewtonManager``.
 """
 
 from __future__ import annotations
@@ -49,8 +50,8 @@ TASKS = {
 
 BACKENDS = {
     "default": {
-        "label": "default BVH",
-        "override": None,
+        "label": "default LBVH BVH",
+        "override": "env.sim.physics.mesh_bvh_constructor=lbvh",
     },
     "cubql": {
         "label": "cuBQL BVH",
