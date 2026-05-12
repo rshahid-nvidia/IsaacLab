@@ -191,8 +191,15 @@ def _aggregate(summary: dict[str, Any]) -> None:
 
 
 def _plot_summary(summary: dict[str, Any], output_dir: Path) -> list[str]:
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import MaxNLocator
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.ticker import MaxNLocator
+    except ModuleNotFoundError as exc:
+        if exc.name != "matplotlib":
+            raise
+        print("[WARN] matplotlib is not installed; skipping plots and writing JSON summary only.")
+        summary["plots"] = []
+        return []
 
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
@@ -337,9 +344,12 @@ def main() -> int:
         summary = json.loads(summary_path.read_text())
         summary["summary_path"] = str(summary_path)
         _aggregate(summary)
-        _plot_summary(summary, summary_path.parent)
+        plot_paths = _plot_summary(summary, summary_path.parent)
         _write_summary(summary, summary_path)
-        print(f"[OK] Wrote plots under {summary_path.parent / 'plots'}")
+        if plot_paths:
+            print(f"[OK] Wrote plots under {summary_path.parent / 'plots'}")
+        else:
+            print("[OK] Plot generation skipped.")
         return 0
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -381,13 +391,14 @@ def main() -> int:
                     _write_summary(summary, summary_path)
 
     _aggregate(summary)
+    plot_paths = []
     if not args.dry_run:
-        _plot_summary(summary, output_root)
+        plot_paths = _plot_summary(summary, output_root)
     _write_summary(summary, summary_path)
 
     failed = [run for run in summary["runs"] if run["status"] == "failed"]
     print(f"[OK] Summary: {summary_path}")
-    if not args.dry_run:
+    if plot_paths:
         print(f"[OK] Plots: {output_root / 'plots'}")
     return 1 if failed else 0
 
