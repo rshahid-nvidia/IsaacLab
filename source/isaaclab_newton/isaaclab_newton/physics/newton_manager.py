@@ -493,8 +493,9 @@ class NewtonManager(PhysicsManager):
     def create_builder(cls, up_axis: str | None = None, **kwargs) -> ModelBuilder:
         """Create a :class:`ModelBuilder` configured with default settings.
 
-        Forwards :class:`NewtonShapeCfg` defaults onto Newton's upstream
-        ``ModelBuilder.default_shape_cfg`` via :func:`~isaaclab.utils.checked_apply`.
+        Forwards :class:`NewtonMeshCfg` and :class:`NewtonShapeCfg` defaults onto Newton's upstream
+        ``ModelBuilder.default_mesh_cfg`` and ``ModelBuilder.default_shape_cfg`` via
+        :func:`~isaaclab.utils.checked_apply`.
         Falls back to wrapper defaults when no Newton config is active so
         rough-terrain margin/gap still apply during early construction.
 
@@ -504,13 +505,15 @@ class NewtonManager(PhysicsManager):
             **kwargs: Forwarded to :class:`ModelBuilder`.
 
         Returns:
-            New builder with up-axis and per-shape defaults (gap, margin) applied.
+            New builder with up-axis, mesh defaults, and per-shape defaults (gap, margin) applied.
         """
-        builder = ModelBuilder(up_axis=up_axis or cls._up_axis, **kwargs)
         # Resolve which NewtonShapeCfg to apply: user override if active config
         # is NewtonCfg, else the wrapper's own defaults so callers from non-Newton
         # contexts (tests, early construction) still get the rough-terrain margin.
         cfg = PhysicsManager._cfg
+        builder = ModelBuilder(up_axis=up_axis or cls._up_axis, **kwargs)
+        mesh_cfg = cfg.default_mesh_cfg if isinstance(cfg, NewtonCfg) else NewtonMeshCfg()
+        checked_apply(mesh_cfg, builder.default_mesh_cfg)
         shape_cfg = cfg.default_shape_cfg if isinstance(cfg, NewtonCfg) else NewtonShapeCfg()
         checked_apply(shape_cfg, builder.default_shape_cfg)
         return builder
@@ -826,7 +829,7 @@ class NewtonManager(PhysicsManager):
                     env_paths.append((int(m.group(1)), child.GetPath().pathString))
         env_paths.sort(key=lambda x: x[0])
 
-        builder = ModelBuilder(up_axis=up_axis)
+        builder = cls.create_builder(up_axis=up_axis)
 
         schema_resolvers = [SchemaResolverNewton(), SchemaResolverPhysx()]
 
@@ -840,7 +843,7 @@ class NewtonManager(PhysicsManager):
 
             # Build a prototype from the first env (all envs assumed identical)
             _, proto_path = env_paths[0]
-            proto = ModelBuilder(up_axis=up_axis)
+            proto = cls.create_builder(up_axis=up_axis)
             proto.add_usd(
                 stage,
                 root_path=proto_path,

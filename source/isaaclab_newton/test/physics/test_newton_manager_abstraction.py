@@ -42,6 +42,7 @@ from isaaclab_newton.physics import (
 )
 from newton.solvers import SolverFeatherstone, SolverKamino, SolverMuJoCo, SolverXPBD
 
+from isaaclab.physics import PhysicsManager
 from isaaclab.sim import SimulationCfg, build_simulation_context
 
 # ---------------------------------------------------------------------------
@@ -132,6 +133,18 @@ def test_newton_cfg_post_init_propagates_class_type(
     """``NewtonCfg.__post_init__`` lifts ``solver_cfg.class_type`` onto ``NewtonCfg.class_type``."""
     cfg = NewtonCfg(solver_cfg=solver_cfg_factory())
     assert cfg.class_type.__name__ == expected_manager.__name__
+
+
+@pytest.mark.parametrize("bvh_constructor", ["cubql", None])
+def test_create_builder_forwards_mesh_cfg(monkeypatch, bvh_constructor):
+    """``NewtonCfg.default_mesh_cfg`` is applied before Newton finalizes mesh handles."""
+    cfg = NewtonCfg(solver_cfg=MJWarpSolverCfg())
+    cfg.default_mesh_cfg.bvh_constructor = bvh_constructor
+    monkeypatch.setattr(PhysicsManager, "_cfg", cfg)
+
+    builder = NewtonManager.create_builder()
+
+    assert builder.default_mesh_cfg.bvh_constructor == bvh_constructor
 
 
 # ---------------------------------------------------------------------------

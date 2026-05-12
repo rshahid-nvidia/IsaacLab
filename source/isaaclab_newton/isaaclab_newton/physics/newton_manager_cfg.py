@@ -74,6 +74,23 @@ class NewtonShapeCfg:
 
 
 @configclass
+class NewtonMeshCfg:
+    """Default mesh construction settings applied when Newton finalizes triangle mesh shapes.
+
+    Mirrors Newton's :attr:`ModelBuilder.default_mesh_cfg`. The struct is forwarded
+    onto Newton's upstream ``MeshConfig`` via :func:`~isaaclab.utils.checked_apply`
+    at builder construction.
+    """
+
+    bvh_constructor: str | None = "cubql"
+    """Warp mesh BVH constructor backend.
+
+    The default selects Warp's cuBQL backend for mesh traversal. Set to ``None`` to use Warp's default mesh BVH
+    constructor.
+    """
+
+
+@configclass
 class NewtonCfg(PhysicsCfg):
     """Configuration for Newton physics manager.
 
@@ -136,6 +153,13 @@ class NewtonCfg(PhysicsCfg):
     Forwarded to Newton's :attr:`ModelBuilder.default_shape_cfg` at builder
     construction via :func:`~isaaclab.utils.checked_apply`. See
     :class:`NewtonShapeCfg` for the declared fields.
+    """
+
+    default_mesh_cfg: NewtonMeshCfg = NewtonMeshCfg()
+    """Default mesh construction settings applied when Newton finalizes triangle mesh shapes.
+
+    Forwarded to Newton's :attr:`ModelBuilder.default_mesh_cfg` at builder construction
+    via :func:`~isaaclab.utils.checked_apply`.
     """
 
     def __post_init__(self):
