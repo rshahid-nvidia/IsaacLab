@@ -5,11 +5,11 @@
 
 """Run and plot IsaacLab startup/load-time sweeps for Newton mesh BVH backends.
 
-This experiment compares Warp's default GPU mesh BVH backend (LBVH) against
+This experiment compares specific Warp mesh BVH constructors: SAH, LBVH, and
 cuBQL for IsaacLab startup phases. It is intentionally IsaacLab-only: backend
-selection is done through ``env.sim.physics.mesh_bvh_constructor=<name>``, which
-is handled by the experiment branch's NewtonManager monkey patch. No local
-Newton source change is required.
+selection is done through ``env.sim.physics.mesh_bvh_constructor=<name>``,
+which is handled by the experiment branch's NewtonManager monkey patch. No
+local Newton source change is required.
 """
 
 from __future__ import annotations
@@ -48,9 +48,15 @@ TASKS = {
     ),
 }
 
+BASELINE_BACKEND = "lbvh"
+
 BACKENDS = {
-    "default": {
-        "label": "default LBVH BVH",
+    "sah": {
+        "label": "SAH BVH",
+        "override": "env.sim.physics.mesh_bvh_constructor=sah",
+    },
+    "lbvh": {
+        "label": "LBVH BVH",
         "override": "env.sim.physics.mesh_bvh_constructor=lbvh",
     },
     "cubql": {
@@ -265,9 +271,9 @@ def _plot_summary(summary: dict[str, Any], output_dir: Path, plot_metric: str) -
     plots_dir.mkdir(parents=True, exist_ok=True)
     plot_paths: list[str] = []
 
-    colors = {"default": "#4C78A8", "cubql": "#F58518"}
-    markers = {"default": "o", "cubql": "s"}
-    linestyles = {"default": "-", "cubql": "--"}
+    colors = {"sah": "#54A24B", "lbvh": "#4C78A8", "cubql": "#F58518"}
+    markers = {"sah": "^", "lbvh": "o", "cubql": "s"}
+    linestyles = {"sah": ":", "lbvh": "-", "cubql": "--"}
     metric_label = PLOT_LABELS[plot_metric]
 
     for task in summary["tasks"]:
@@ -279,7 +285,7 @@ def _plot_summary(summary: dict[str, Any], output_dir: Path, plot_metric: str) -
                 _aggregate_metric(summary, task_name, backend_name, num_envs, plot_metric) for num_envs in envs
             ]
 
-        baseline = by_backend["default"]
+        baseline = by_backend[BASELINE_BACKEND]
         pct_by_backend: dict[str, list[float | None]] = {}
         for backend_name, series in by_backend.items():
             pct_values: list[float | None] = []
@@ -298,7 +304,7 @@ def _plot_summary(summary: dict[str, Any], output_dir: Path, plot_metric: str) -
         fig.text(
             0.5,
             0.92,
-            f"Top: {metric_label.lower()}. Bottom: time delta vs default BVH baseline.",
+            f"Top: {metric_label.lower()}. Bottom: time delta vs LBVH baseline.",
             ha="center",
             va="center",
             fontsize=14,
@@ -333,7 +339,7 @@ def _plot_summary(summary: dict[str, Any], output_dir: Path, plot_metric: str) -
             labels.append(BACKENDS[backend_name]["label"])
 
         axes[0].set_ylabel(f"{metric_label} (s)", fontsize=12)
-        axes[1].set_ylabel("% time vs default BVH", fontsize=12)
+        axes[1].set_ylabel("% time vs LBVH", fontsize=12)
         axes[1].set_xlabel("Number of environments", fontsize=12)
         axes[1].axhline(0.0, color="#888888", linewidth=1.0)
 
@@ -356,7 +362,7 @@ def _plot_summary(summary: dict[str, Any], output_dir: Path, plot_metric: str) -
         )
         fig.tight_layout(rect=[0.04, 0.045, 0.98, 0.89])
 
-        stem = f"{task_name}_{plot_metric}_pct_vs_default_bvh"
+        stem = f"{task_name}_{plot_metric}_pct_vs_lbvh"
         for suffix in ("png", "svg"):
             path = plots_dir / f"{stem}.{suffix}"
             fig.savefig(path, dpi=160)
@@ -379,7 +385,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--tasks", nargs="+", choices=sorted(TASKS), default=list(TASKS))
-    parser.add_argument("--backends", nargs="+", choices=sorted(BACKENDS), default=["default", "cubql"])
+    parser.add_argument("--backends", nargs="+", choices=sorted(BACKENDS), default=["sah", "lbvh", "cubql"])
     parser.add_argument(
         "--plot-metric",
         choices=sorted(STARTUP_METRICS),
@@ -395,8 +401,8 @@ def main() -> int:
     args = parse_args()
     repo_root = _repo_root()
 
-    if "default" not in args.backends:
-        raise ValueError("The default backend must be included because plots use it as the baseline.")
+    if BASELINE_BACKEND not in args.backends:
+        raise ValueError(f"The {BASELINE_BACKEND!r} backend must be included because plots use it as the baseline.")
 
     if args.plot_only is not None:
         summary_path = args.plot_only.resolve()
